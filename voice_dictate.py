@@ -212,7 +212,7 @@ class VoiceDictate:
         self,
         device_id: str = ":1",  # Default to MacBook Pro Microphone
         sample_rate: int = 16000,
-        stop_key_combo: tuple = (keyboard.Key.cmd, keyboard.KeyCode.from_char('r'))
+        stop_key_combo: tuple = (keyboard.Key.cmd, keyboard.KeyCode.from_char('`'))
     ) -> Path:
         """
         Record audio with push-to-talk functionality.
@@ -247,7 +247,7 @@ class VoiceDictate:
         def on_key_release(key):
             keys_pressed.discard(key)
         
-        print("🎙️  Recording started automatically! Press Cmd+R to stop...")
+        print("🎙️  Recording started automatically! Press Cmd+` to stop...")
         print("Start speaking now...")
         
         # Start recording immediately

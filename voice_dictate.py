@@ -17,6 +17,8 @@ import tempfile
 import subprocess
 import argparse
 import json
+import threading
+import signal
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime
@@ -36,9 +38,11 @@ except ImportError:
 try:
     from openai import OpenAI
     import pyperclip
+    from pynput import keyboard
 except ImportError as e:
     print(f"Error: Required package not found: {e}")
     print("Please run: uv sync")
+    print("Note: pynput is required for push-to-talk functionality")
     sys.exit(1)
 
 
@@ -62,6 +66,11 @@ class VoiceDictate:
         self.client = OpenAI(api_key=self.api_key)
         self.temp_dir = Path(tempfile.gettempdir()) / "voice_dictate"
         self.temp_dir.mkdir(exist_ok=True)
+        
+        # Push-to-talk state
+        self.recording = False
+        self.stop_recording = threading.Event()
+        self.ffmpeg_process = None
         
     def check_dependencies(self) -> bool:
         """
@@ -199,6 +208,111 @@ class VoiceDictate:
                 print(f"ffmpeg error: {e.stderr}")
             raise
     
+    def record_push_to_talk(
+        self,
+        device_id: str = ":1",  # Default to MacBook Pro Microphone
+        sample_rate: int = 16000,
+        stop_key_combo: tuple = (keyboard.Key.cmd, keyboard.KeyCode.from_char('r'))
+    ) -> Path:
+        """
+        Record audio with push-to-talk functionality.
+        Press and hold the key combination to start recording, press again to stop.
+        
+        Args:
+            device_id: Audio device ID (":1" for MacBook Pro Microphone)
+            sample_rate: Sample rate in Hz
+            stop_key_combo: Key combination to stop recording
+            
+        Returns:
+            Path to the recorded audio file
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file = self.temp_dir / f"recording_{timestamp}.wav"
+        
+        # State for key monitoring
+        keys_pressed = set()
+        recording_started = False
+        
+        def on_key_press(key):
+            nonlocal recording_started, keys_pressed
+            keys_pressed.add(key)
+            
+            # Check if the key combination is pressed
+            if all(k in keys_pressed for k in stop_key_combo):
+                if not recording_started:
+                    # Start recording
+                    recording_started = True
+                    self.recording = True
+                    print("🎙️  Recording started! Press Cmd+R again to stop...")
+                    self.start_ffmpeg_recording(output_file, device_id, sample_rate)
+                else:
+                    # Stop recording
+                    print("🔄 Stopping recording...")
+                    self.stop_recording.set()
+                    return False  # Stop listener
+        
+        def on_key_release(key):
+            keys_pressed.discard(key)
+        
+        print("🎯 Push-to-talk mode ready!")
+        print("Press Cmd+R to start recording, press Cmd+R again to stop.")
+        print("Press Ctrl+C to cancel anytime.")
+        
+        # Start keyboard listener
+        with keyboard.Listener(on_press=on_key_press, on_release=on_key_release) as listener:
+            try:
+                listener.join()  # Wait for stop signal
+            except KeyboardInterrupt:
+                print("\n⛔ Recording cancelled by user")
+                if self.ffmpeg_process:
+                    self.ffmpeg_process.terminate()
+                raise
+        
+        # Wait for ffmpeg to finish
+        if self.ffmpeg_process:
+            self.ffmpeg_process.wait()
+            print("✅ Recording complete!")
+        
+        return output_file
+    
+    def start_ffmpeg_recording(self, output_file: Path, device_id: str, sample_rate: int):
+        """Start FFmpeg recording in a separate thread."""
+        def record():
+            cmd = [
+                'ffmpeg',
+                '-f', 'avfoundation',
+                '-i', device_id,
+                '-ar', str(sample_rate),
+                '-ac', '1',
+                '-acodec', 'pcm_s16le',
+                '-y',
+                str(output_file)
+            ]
+            
+            try:
+                self.ffmpeg_process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                
+                # Wait for stop signal
+                while not self.stop_recording.is_set():
+                    time.sleep(0.1)
+                
+                # Stop recording by terminating ffmpeg
+                if self.ffmpeg_process.poll() is None:
+                    self.ffmpeg_process.terminate()
+                    self.ffmpeg_process.wait()
+                    
+            except Exception as e:
+                print(f"Error during recording: {e}")
+        
+        # Start recording in a thread
+        recording_thread = threading.Thread(target=record)
+        recording_thread.daemon = True
+        recording_thread.start()
+    
     def transcribe_audio(
         self,
         audio_file: Path,
@@ -325,22 +439,24 @@ class VoiceDictate:
         duration: int = 10,
         model: str = "whisper-1",
         auto_paste: bool = True,
-        device_id: str = ":0",
+        device_id: str = ":1",  # Default to MacBook Pro Microphone
         language: Optional[str] = None,
         prompt: Optional[str] = None,
-        show_text: bool = True
+        show_text: bool = True,
+        push_to_talk: bool = False
     ) -> str:
         """
         Main dictation workflow: record, transcribe, and copy/paste.
         
         Args:
-            duration: Recording duration in seconds
+            duration: Recording duration in seconds (ignored if push_to_talk=True)
             model: Whisper model to use
             auto_paste: Whether to automatically paste after copying
-            device_id: Audio device ID
+            device_id: Audio device ID (":1" for MacBook Pro Microphone)
             language: Language code for transcription
             prompt: Optional prompt for the model
             show_text: Whether to print the transcribed text
+            push_to_talk: Use Cmd+R to start/stop recording instead of fixed duration
             
         Returns:
             The transcribed text
@@ -351,11 +467,16 @@ class VoiceDictate:
         
         try:
             # Record audio
-            audio_file = self.record_audio(
-                duration=duration,
-                device_id=device_id,
-                show_progress=True
-            )
+            if push_to_talk:
+                audio_file = self.record_push_to_talk(
+                    device_id=device_id
+                )
+            else:
+                audio_file = self.record_audio(
+                    duration=duration,
+                    device_id=device_id,
+                    show_progress=True
+                )
             
             # Transcribe audio
             text = self.transcribe_audio(
@@ -395,26 +516,23 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Basic usage (10 second recording)
-  python voice_dictate.py
+  # Basic usage (10 second recording, MacBook Pro mic)
+  uv run voice_dictate.py
   
-  # Record for 5 seconds
-  python voice_dictate.py --duration 5
+  # Push-to-talk mode (Cmd+R to start/stop)
+  uv run voice_dictate.py --push-to-talk
   
-  # Use a specific model
-  python voice_dictate.py --model gpt-4o-mini-transcribe
+  # Record for 5 seconds with specific model
+  uv run voice_dictate.py --duration 5 --model gpt-4o-mini-transcribe
   
-  # Specify language
-  python voice_dictate.py --language en
+  # Use headset microphone instead of built-in
+  uv run voice_dictate.py --device ":0"
   
   # List available audio devices
-  python voice_dictate.py --list-devices
+  uv run voice_dictate.py --list-devices
   
-  # Use a specific audio device
-  python voice_dictate.py --device ":1"
-  
-  # Don't auto-paste (just copy to clipboard)
-  python voice_dictate.py --no-paste
+  # Push-to-talk with no auto-paste
+  uv run voice_dictate.py --push-to-talk --no-paste
         """
     )
     
@@ -447,8 +565,8 @@ Examples:
     parser.add_argument(
         '--device', 
         type=str,
-        default=':0',
-        help='Audio device ID (default: ":0" for default microphone)'
+        default=':1',
+        help='Audio device ID (default: ":1" for MacBook Pro Microphone)'
     )
     
     parser.add_argument(
@@ -473,6 +591,12 @@ Examples:
         '--quiet', '-q',
         action='store_true',
         help="Don't show the transcribed text"
+    )
+    
+    parser.add_argument(
+        '--push-to-talk', '-t',
+        action='store_true',
+        help="Use Cmd+R to start/stop recording instead of fixed duration"
     )
     
     args = parser.parse_args()
@@ -509,7 +633,8 @@ Examples:
             device_id=args.device,
             language=args.language,
             prompt=args.prompt,
-            show_text=not args.quiet
+            show_text=not args.quiet,
+            push_to_talk=args.push_to_talk
         )
         
     except KeyboardInterrupt:

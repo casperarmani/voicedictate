@@ -234,31 +234,28 @@ class VoiceDictate:
         recording_started = False
         
         def on_key_press(key):
-            nonlocal recording_started, keys_pressed
+            nonlocal keys_pressed
             keys_pressed.add(key)
             
-            # Check if the key combination is pressed
+            # Check if the stop key combination is pressed
             if all(k in keys_pressed for k in stop_key_combo):
-                if not recording_started:
-                    # Start recording
-                    recording_started = True
-                    self.recording = True
-                    print("🎙️  Recording started! Press Cmd+R again to stop...")
-                    self.start_ffmpeg_recording(output_file, device_id, sample_rate)
-                else:
-                    # Stop recording
-                    print("🔄 Stopping recording...")
-                    self.stop_recording.set()
-                    return False  # Stop listener
+                # Stop recording
+                print("🔄 Stopping recording...")
+                self.stop_recording.set()
+                return False  # Stop listener
         
         def on_key_release(key):
             keys_pressed.discard(key)
         
-        print("🎯 Push-to-talk mode ready!")
-        print("Press Cmd+R to start recording, press Cmd+R again to stop.")
-        print("Press Ctrl+C to cancel anytime.")
+        print("🎙️  Recording started automatically! Press Cmd+R to stop...")
+        print("Start speaking now...")
         
-        # Start keyboard listener
+        # Start recording immediately
+        recording_started = True
+        self.recording = True
+        self.start_ffmpeg_recording(output_file, device_id, sample_rate)
+        
+        # Start keyboard listener for stop signal only
         with keyboard.Listener(on_press=on_key_press, on_release=on_key_release) as listener:
             try:
                 listener.join()  # Wait for stop signal

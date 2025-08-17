@@ -272,6 +272,26 @@ class VoiceDictate:
         
         return output_file
     
+    def wait_for_start_signal(self):
+        """Wait for Cmd+` to start the next recording."""
+        keys_pressed = set()
+        
+        def on_key_press(key):
+            nonlocal keys_pressed
+            keys_pressed.add(key)
+            
+            # Check if Cmd+` is pressed
+            if (keyboard.Key.cmd in keys_pressed and 
+                keyboard.KeyCode.from_char('`') in keys_pressed):
+                return False  # Stop listener
+        
+        def on_key_release(key):
+            keys_pressed.discard(key)
+        
+        # Wait for Cmd+` to start next recording
+        with keyboard.Listener(on_press=on_key_press, on_release=on_key_release) as listener:
+            listener.join()
+    
     def start_ffmpeg_recording(self, output_file: Path, device_id: str, sample_rate: int):
         """Start FFmpeg recording in a separate thread."""
         def record():
@@ -462,47 +482,71 @@ class VoiceDictate:
         if not self.check_dependencies():
             sys.exit(1)
         
-        try:
-            # Record audio
-            if push_to_talk:
-                audio_file = self.record_push_to_talk(
-                    device_id=device_id
+        # Loop for multiple recordings in push-to-talk mode
+        while True:
+            try:
+                # Record audio
+                if push_to_talk:
+                    audio_file = self.record_push_to_talk(
+                        device_id=device_id
+                    )
+                else:
+                    audio_file = self.record_audio(
+                        duration=duration,
+                        device_id=device_id,
+                        show_progress=True
+                    )
+                
+                # Transcribe audio
+                text = self.transcribe_audio(
+                    audio_file=audio_file,
+                    model=model,
+                    language=language,
+                    prompt=prompt
                 )
-            else:
-                audio_file = self.record_audio(
-                    duration=duration,
-                    device_id=device_id,
-                    show_progress=True
-                )
-            
-            # Transcribe audio
-            text = self.transcribe_audio(
-                audio_file=audio_file,
-                model=model,
-                language=language,
-                prompt=prompt
-            )
-            
-            # Copy to clipboard
-            self.copy_to_clipboard(text)
-            
-            # Show transcribed text if requested
-            if show_text:
-                print(f"\n📝 Transcribed text:\n{text}\n")
-            
-            # Auto-paste if requested
-            if auto_paste:
-                time.sleep(0.1)  # Small delay to ensure clipboard is ready
-                self.simulate_paste()
-            
-            # Clean up old recordings
-            self.cleanup_old_recordings()
-            
-            return text
-            
-        except Exception as e:
-            print(f"Error during dictation: {e}")
-            raise
+                
+                # Copy to clipboard
+                self.copy_to_clipboard(text)
+                
+                # Show transcribed text if requested
+                if show_text:
+                    print(f"\n📝 Transcribed text:\n{text}\n")
+                
+                # Auto-paste if requested
+                if auto_paste:
+                    time.sleep(0.1)  # Small delay to ensure clipboard is ready
+                    self.simulate_paste()
+                
+                # Clean up old recordings
+                self.cleanup_old_recordings()
+                
+                # If using push-to-talk mode, wait for next recording
+                if push_to_talk:
+                    print("\n" + "="*50)
+                    print("🎯 Ready for next recording!")
+                    print("Press Cmd+` to start recording again, or Ctrl+C to exit.")
+                    print("="*50 + "\n")
+                    
+                    # Reset state for next recording
+                    self.stop_recording.clear()
+                    
+                    # Wait for key press to start next recording
+                    self.wait_for_start_signal()
+                    
+                    # Continue to next recording
+                    continue
+                
+                return text
+                
+            except KeyboardInterrupt:
+                print("\n\n⛔ Dictation cancelled by user")
+                sys.exit(0)
+            except Exception as e:
+                print(f"Error during dictation: {e}")
+                if not push_to_talk:
+                    raise
+                # In push-to-talk mode, continue to next recording on error
+                print("Continuing to next recording...")
 
 
 def main():

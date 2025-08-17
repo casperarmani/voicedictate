@@ -210,7 +210,7 @@ class VoiceDictate:
     
     def record_push_to_talk(
         self,
-        device_id: str = ":1",  # Default to MacBook Pro Microphone
+        device_id: str = ":2",  # Default to MacBook Pro Microphone
         sample_rate: int = 16000,
         stop_key_combo: tuple = (keyboard.Key.cmd, keyboard.KeyCode.from_char('`'))
     ) -> Path:
@@ -456,7 +456,7 @@ class VoiceDictate:
         duration: int = 10,
         model: str = "whisper-1",
         auto_paste: bool = True,
-        device_id: str = ":1",  # Default to MacBook Pro Microphone
+        device_id: str = ":2",  # Default to MacBook Pro Microphone
         language: Optional[str] = None,
         prompt: Optional[str] = None,
         show_text: bool = True,
@@ -606,8 +606,8 @@ Examples:
     parser.add_argument(
         '--device', 
         type=str,
-        default=':1',
-        help='Audio device ID (default: ":1" for MacBook Pro Microphone)'
+        default=':2',
+        help='Audio device ID (default: ":2" for MacBook Pro Microphone)'
     )
     
     parser.add_argument(

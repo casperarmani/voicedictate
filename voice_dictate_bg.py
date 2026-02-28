@@ -21,6 +21,7 @@ import sys
 import time
 import wave
 import signal
+import subprocess
 import threading
 import argparse
 import collections
@@ -41,11 +42,11 @@ try:
 except ImportError:
     pass
 
+from openai import OpenAI
+import pyperclip
 import torch
 import sounddevice as sd
 from silero_vad import load_silero_vad
-
-from voice_dictate import VoiceDictate
 
 # Audio format constants (must match Silero VAD requirements)
 SAMPLE_RATE = 16000
@@ -94,7 +95,19 @@ class BackgroundDictation:
 
     def __init__(self, config: VADConfig, api_key: Optional[str] = None):
         self.config = config
-        self.dictator = VoiceDictate(api_key=api_key)
+
+        # OpenAI client
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "OpenAI API key not found. Set OPENAI_API_KEY environment variable, "
+                "add it to .env, or pass --api-key."
+            )
+        self.client = OpenAI(api_key=self.api_key)
+
+        # Temp directory for WAV files
+        self.temp_dir = Path(tempfile.gettempdir()) / "voice_dictate"
+        self.temp_dir.mkdir(exist_ok=True)
 
         # Load Silero VAD
         self.vad_model = None
@@ -109,9 +122,6 @@ class BackgroundDictation:
 
         # Pause/resume support (for future hotkey integration)
         self.paused = threading.Event()
-
-        # Temp directory (reuse VoiceDictate's)
-        self.temp_dir = self.dictator.temp_dir
 
         # Stats
         self.segments_transcribed = 0
@@ -251,24 +261,18 @@ class BackgroundDictation:
                 duration = len(audio_data) / SAMPLE_RATE
                 print(f"[Transcribe] Processing {duration:.1f}s of audio...")
 
-                text = self.dictator.transcribe_audio(
-                    audio_file=wav_path,
-                    model=self.config.model,
-                    language=self.config.language,
-                    prompt=self.config.prompt,
-                    temperature=0.0,
-                )
+                text = self._transcribe_audio(wav_path)
 
                 if text and text.strip():
                     print(f"\n{'=' * 40}")
                     print(f"  {text}")
                     print(f"{'=' * 40}\n")
 
-                    self.dictator.copy_to_clipboard(text + " ")
+                    self._copy_to_clipboard(text + " ")
 
                     if self.config.auto_paste:
                         time.sleep(0.1)
-                        self.dictator.simulate_paste()
+                        self._simulate_paste()
 
                     self.segments_transcribed += 1
                 else:
@@ -276,12 +280,65 @@ class BackgroundDictation:
 
                 # Periodic cleanup
                 if self.segments_transcribed % 5 == 0:
-                    self.dictator.cleanup_old_recordings(keep_last=10)
+                    self._cleanup_old_recordings()
 
             except Exception as e:
                 print(f"[Transcribe] Error: {e}")
 
         print("[Transcribe] Transcription loop exiting.")
+
+    def _transcribe_audio(self, audio_file: Path) -> str:
+        """Transcribe audio file using OpenAI Whisper API."""
+        print(f"Transcribing with {self.config.model}...")
+        with open(audio_file, "rb") as f:
+            params = {
+                "model": self.config.model,
+                "file": f,
+                "temperature": 0.0,
+            }
+            if self.config.language:
+                params["language"] = self.config.language
+            if self.config.prompt:
+                params["prompt"] = self.config.prompt
+
+            response = self.client.audio.transcriptions.create(**params)
+        return response.text
+
+    def _copy_to_clipboard(self, text: str) -> None:
+        """Copy text to the system clipboard."""
+        try:
+            pyperclip.copy(text)
+        except Exception:
+            subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
+
+    def _simulate_paste(self) -> None:
+        """Simulate Cmd+V to paste clipboard content."""
+        try:
+            applescript = '''
+            tell application "System Events"
+                keystroke "v" using command down
+            end tell
+            '''
+            subprocess.run(
+                ["osascript", "-e", applescript],
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError:
+            print("Warning: Could not auto-paste. Check Terminal accessibility permissions.")
+
+    def _cleanup_old_recordings(self, keep_last: int = 10) -> None:
+        """Clean up old recording files."""
+        try:
+            recordings = sorted(
+                self.temp_dir.glob("bg_recording_*.wav"),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )
+            for recording in recordings[keep_last:]:
+                recording.unlink()
+        except Exception:
+            pass
 
     def _save_wav(self, audio_data: np.ndarray) -> Path:
         """Save float32 numpy audio as 16-bit PCM WAV (what Whisper expects)."""

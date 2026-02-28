@@ -145,8 +145,7 @@ All of these can also be set in `shortcut_script.sh` for the shortcut workflow.
 
 ```
 Voice_Dictate/
-├── voice_dictate_bg.py    # Background VAD listener (main app)
-├── voice_dictate.py       # Legacy push-to-talk mode
+├── voice_dictate_bg.py    # Main app (background VAD listener)
 ├── shortcut_script.sh     # macOS Shortcuts toggle script
 ├── pyproject.toml         # Dependencies
 ├── .env                   # Your API key

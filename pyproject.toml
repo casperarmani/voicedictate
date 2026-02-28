@@ -8,7 +8,6 @@ dependencies = [
     "openai>=1.0.0",
     "pyperclip>=1.8.0",
     "python-dotenv>=1.0.0",
-    "pynput>=1.7.0",
     "torch==2.2.2",
     "silero-vad>=5.1",
     "sounddevice>=0.4.6",
@@ -23,12 +22,14 @@ dev = [
 ]
 
 [project.scripts]
-voice-dictate = "voice_dictate:main"
-voice-dictate-bg = "voice_dictate_bg:main"
+voice-dictate = "voice_dictate_bg:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
 
 [tool.uv]
 dev-dependencies = []

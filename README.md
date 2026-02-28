@@ -1,19 +1,19 @@
 # Voice Dictate for macOS
 
-**One-tap voice dictation with OpenAI Whisper that works system-wide.**
+**Always-on voice dictation with OpenAI Whisper that works system-wide.**
 
-## 🎯 What It Does
+## What It Does
 
-1. **Tap Touch Bar** → **Starts recording immediately**
-2. **Talk for as long as you want** 🗣️
-3. **Press Cmd+`** → **Transcribes and pastes text wherever your cursor is**
-4. **Ready for next recording** (same terminal, no new windows)
+1. **Start listening** (via shortcut or terminal command)
+2. **Just talk** — Silero VAD automatically detects when you start and stop speaking
+3. **Text appears** wherever your cursor is — transcribed and pasted automatically
+4. **Keep talking** — it keeps listening for your next utterance
 
-Works from **any app** - Chrome, Slack, Notes, Cursor, anywhere!
+No buttons to hold, no fixed timers. Works from **any app** — Chrome, Slack, Notes, Cursor, anywhere.
 
 ---
 
-## 🚀 Quick Setup
+## Quick Setup
 
 ### 1. Install Dependencies
 ```bash
@@ -26,176 +26,142 @@ uv sync
 ```
 
 ### 2. Add Your OpenAI API Key
-Your API key is already in the `.env` file - you're ready to go!
-
-### 3. Test It Works
+Create a `.env` file in the project directory:
 ```bash
-# Test 5-second recording
-uv run voice_dictate.py --duration 5 --no-paste
-
-# You should see transcribed text in terminal
+OPENAI_API_KEY=sk-your-key-here
 ```
 
-### 4. Set Up Touch Bar Shortcut
-
-**Open Shortcuts App:**
-- Press `Cmd+Space`, type "Shortcuts", press Enter
-
-**Create New Shortcut:**
-- Click "+" button
-- Name it "Voice Dictate"
-
-**Add Shell Script:**
-- Search for "Run Shell Script" and add it
-- **Shell**: `/bin/zsh`
-- **Input**: `No Input`
-- **Paste this exact script:**
-
-```bash
-#!/bin/zsh
-
-# Run in Terminal without switching to it
-osascript -e '
-tell application "Terminal"
-    if (count of windows) > 0 then
-        -- Use existing front window but dont bring Terminal to front
-        do script "cd ~/Downloads/Voice_Dictate && uv run voice_dictate.py --push-to-talk --model gpt-4o-mini-transcribe --quiet" in front window
-    else
-        -- Create new window only if none exist
-        do script "cd ~/Downloads/Voice_Dictate && uv run voice_dictate.py --push-to-talk --model gpt-4o-mini-transcribe --quiet"
-    end if
-end tell'
-```
-
-**Add to Touch Bar:**
-- Right-click your shortcut → "Add to Menu Bar" or "Add to Touch Bar"
-- Or: Right-click → "Shortcut Settings" → "Use as Quick Action"
-- Then: System Settings → Keyboard → "Customize Control Strip" → Drag "Quick Actions" to Touch Bar
-
-### 5. Grant Permissions
+### 3. Grant Permissions
 
 **Microphone Access:**
-- Allow when prompted
+- Allow when prompted on first run
 
 **Accessibility Access (for auto-paste):**
-- System Settings → Privacy & Security → Accessibility
-- Add "Terminal" and make sure it's checked ✅
+- System Settings > Privacy & Security > Accessibility
+- Add "Terminal" and toggle it ON
 
----
-
-## 🎙️ How to Use
-
-### First Recording
-1. **Tap Touch Bar icon** 
-2. **Terminal opens in background, recording starts immediately**
-3. **Start talking** (no desktop switching)
-4. **Press Cmd+`** when done talking
-5. **Text transcribes and pastes** where your cursor was
-
-### Subsequent Recordings (Same Session)
-1. **Terminal shows**: "🎯 Ready for next recording! Press Cmd+` to start recording again"
-2. **Press Cmd+`** → **Starts new recording**
-3. **Talk** → **Press Cmd+`** → **Transcribes and pastes**
-4. **Repeat forever** (no Touch Bar needed)
-
-### Exit
-- **Ctrl+C** in terminal or just close the terminal window
-
----
-
-## ⚙️ Customization
-
-### Different Models
-Edit the shortcut script to change model:
+### 4. Test It
 ```bash
-# Faster, cheaper
---model gpt-4o-mini-transcribe
-
-# Best quality, more expensive  
---model gpt-4o-transcribe
-
-# Original Whisper
---model whisper-1
+cd ~/Downloads/Voice_Dictate
+uv run voice_dictate_bg.py --device 3
 ```
 
-### Different Languages
-Add language specification:
+Speak a sentence, wait ~1.5 seconds, and your text should appear.
+
+---
+
+## How to Use
+
+### From Terminal
 ```bash
-# Add to the command
+cd ~/Downloads/Voice_Dictate
+
+# Start with MacBook Pro mic
+uv run voice_dictate_bg.py --device 3
+
+# Start with system default mic
+uv run voice_dictate_bg.py
+
+# Clipboard only (no auto-paste)
+uv run voice_dictate_bg.py --device 3 --no-paste
+
+# List available microphones
+uv run voice_dictate_bg.py --list-devices
+```
+
+Press **Ctrl+C** to stop listening.
+
+### From macOS Shortcuts (Toggle On/Off)
+
+The included `shortcut_script.sh` works as a toggle — press your shortcut once to start, press again to stop.
+
+**Set up a Shortcut:**
+1. Open Shortcuts app (`Cmd+Space` > "Shortcuts")
+2. Create a new shortcut, name it "Voice Dictate"
+3. Add "Run Shell Script" action
+4. Shell: `/bin/zsh`, Input: `No Input`
+5. Paste the contents of `shortcut_script.sh`
+6. Add to Touch Bar or assign a keyboard shortcut
+
+---
+
+## Configuration
+
+### Transcription Models
+```bash
+--model gpt-4o-mini-transcribe    # Fast, cheap (default)
+--model gpt-4o-transcribe         # Best quality
+--model whisper-1                  # Original Whisper
+```
+
+### VAD Tuning
+```bash
+--vad-threshold 0.5      # Speech confidence 0.0-1.0 (default: 0.5)
+--silence-timeout 1.5    # Seconds of silence to end utterance (default: 1.5)
+--min-speech 0.5         # Minimum speech duration in seconds (default: 0.5)
+```
+
+### Languages
+```bash
 --language en    # English
 --language es    # Spanish
 --language fr    # French
 ```
 
-### Use Headset Microphone
+### Audio Devices
 ```bash
-# Change device (list devices first)
-uv run voice_dictate.py --list-devices
+# List available devices
+uv run voice_dictate_bg.py --list-devices
 
-# Then use specific device
---device ":0"    # Usually headset
---device ":1"    # Usually built-in mic (default)
+# Use a specific device by index
+uv run voice_dictate_bg.py --device 3    # MacBook Pro Microphone
+uv run voice_dictate_bg.py --device 0    # Headset mic
 ```
+
+All of these can also be set in `shortcut_script.sh` for the shortcut workflow.
 
 ---
 
-## 🔧 Troubleshooting
+## Troubleshooting
+
+### Auto-paste not working
+- Grant Terminal accessibility permissions
+- System Settings > Privacy & Security > Accessibility > Add Terminal
+
+### Wrong microphone / fuzzy audio
+- Bluetooth headsets can switch to low-quality HFP mic mode
+- Use `--list-devices` to find your MacBook Pro mic index
+- Use `--device <index>` to select it (usually index 3)
 
 ### "No audio recorded"
-- Check microphone permissions
-- Run: `uv run voice_dictate.py --list-devices` to see available mics
-
-### "Auto-paste not working"
-- Grant Terminal accessibility permissions
-- System Settings → Privacy & Security → Accessibility → Add Terminal
+- Check microphone permissions in System Settings > Privacy & Security > Microphone
 
 ### "Command not found: ffmpeg"
 - Install with: `brew install ffmpeg`
 
-### "Cmd+` conflicts with my app"
-- Edit `voice_dictate.py` line 215 to change key:
-  ```python
-  stop_key_combo: tuple = (keyboard.Key.cmd, keyboard.KeyCode.from_char(';'))
-  ```
-
-### Touch Bar shortcut not working
-- Make sure "Quick Actions" is added to Control Strip
-- Try right-clicking shortcut → "Shortcut Settings" → "Use as Quick Action"
-
 ---
 
-## 📁 Project Files
+## Project Files
 
 ```
 Voice_Dictate/
-├── voice_dictate.py       # Main application
-├── pyproject.toml         # Dependencies  
+├── voice_dictate_bg.py    # Background VAD listener (main app)
+├── voice_dictate.py       # Legacy push-to-talk mode
+├── shortcut_script.sh     # macOS Shortcuts toggle script
+├── pyproject.toml         # Dependencies
 ├── .env                   # Your API key
-├── .gitignore            # Git safety
-└── README.md             # This file
+├── .gitignore             # Git safety
+└── README.md              # This file
 ```
 
 ---
 
-## 💡 Tips
+## How It Works
 
-- **Best recording length**: 30 seconds to 5 minutes works great
-- **Speak clearly**: Normal pace, don't rush
-- **Quiet environment**: Better transcription quality
-- **MacBook Pro mic**: Default is built-in mic (device ":1")
-- **Background use**: Terminal can stay open all day for quick access
+The app uses a 3-thread pipeline:
 
----
+1. **Audio Thread** — `sounddevice` streams mic input continuously
+2. **VAD Thread** — Silero VAD (a neural network) analyzes each 32ms audio chunk and detects speech vs. non-speech. Keyboard typing, AC, fans, etc. are ignored — only human voice triggers it.
+3. **Transcription Thread** — When speech ends (1.5s silence), the audio is sent to OpenAI's Whisper API, transcribed, and pasted into the active app.
 
-## 🎉 You're Done!
-
-**Tap your Touch Bar → Talk → Cmd+` → Text appears!**
-
-Perfect for:
-- 📝 **Note-taking** in any app
-- 💬 **Slack messages** 
-- ✉️ **Email composition**
-- 📄 **Document writing**
-- 💻 **Code comments**
-
-Enjoy your supercharged voice-to-text workflow! 🚀
+All three run concurrently, so the app keeps listening even while a previous utterance is being transcribed.

@@ -76,6 +76,9 @@ venv.bak/
 /tmp/
 temp/
 
+# PID file (background mode toggle)
+.voice_dictate_bg.pid
+
 # Audio files (recordings)
 *.wav
 *.mp3

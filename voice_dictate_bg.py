@@ -20,6 +20,7 @@ Usage:
     uv run voice_dictate_bg.py --no-paste              # clipboard only
 """
 
+import io
 import os
 import sys
 import time
@@ -29,11 +30,10 @@ import subprocess
 import threading
 import argparse
 import collections
-import tempfile
 import numpy as np
+from concurrent.futures import Future, ThreadPoolExecutor
 from queue import Queue, Empty
 from pathlib import Path
-from datetime import datetime
 from typing import Optional
 
 # Try to load .env file if it exists
@@ -64,8 +64,8 @@ VAD_CHUNK_SAMPLES = 512
 
 # Defaults
 DEFAULT_VAD_THRESHOLD = 0.5
-DEFAULT_SILENCE_TIMEOUT = 0.4  # how much trailing silence ends an utterance
-DEFAULT_MIN_SPEECH_DURATION = 0.3
+DEFAULT_SILENCE_TIMEOUT = 0.25  # how much trailing silence ends an utterance
+DEFAULT_MIN_SPEECH_DURATION = 0.2
 DEFAULT_PRE_SPEECH_BUFFER = 0.5
 # whisper-large-v3-turbo on Groq: ~150-300 ms per short clip, very accurate.
 # Alternative: "whisper-large-v3" (slightly slower, marginally better accuracy).
@@ -114,17 +114,23 @@ class BackgroundDictation:
             )
         self.client = OpenAI(api_key=self.api_key, base_url=GROQ_BASE_URL)
 
-        # Temp directory for the WAV files we hand to the API
-        self.temp_dir = Path(tempfile.gettempdir()) / "voice_dictate"
-        self.temp_dir.mkdir(exist_ok=True)
-
         # Load Silero VAD
         self.vad_model = None
         self._load_vad_model()
 
+        # Pre-warm the Groq connection so the first real dictation doesn't pay TLS setup
+        self._prewarm_connection()
+
+        # Worker pool for speculative transcription (fire requests as soon as silence
+        # is detected, before silence_timeout confirms the utterance is over).
+        self.transcribe_executor = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="asr"
+        )
+
         # Thread-safe queues
         self.audio_chunk_queue: Queue = Queue(maxsize=200)
-        self.speech_segment_queue: Queue = Queue(maxsize=10)
+        # Queue items are now Futures resolving to transcribed text.
+        self.speech_segment_queue: "Queue[Optional[Future]]" = Queue(maxsize=10)
 
         # Shutdown coordination
         self.shutdown_event = threading.Event()
@@ -141,6 +147,23 @@ class BackgroundDictation:
         torch.set_num_threads(1)
         self.vad_model = load_silero_vad()
         print("Silero VAD model loaded.")
+
+    def _prewarm_connection(self):
+        """Fire a tiny request to Groq so the first real dictation skips TLS handshake."""
+        print("Pre-warming Groq connection...")
+        try:
+            tiny = self._audio_to_wav_bytes(np.zeros(1600, dtype=np.float32))  # 100ms silence
+            t0 = time.monotonic()
+            self.client.audio.transcriptions.create(
+                model=self.config.model,
+                file=("warmup.wav", tiny, "audio/wav"),
+                temperature=0.0,
+                response_format="text",
+                language=self.config.language or "en",
+            )
+            print(f"Pre-warmed in {(time.monotonic() - t0) * 1000:.0f} ms.")
+        except Exception as e:
+            print(f"Pre-warm failed (will warm on first real call): {e}")
 
     def _audio_callback(self, indata, frames, time_info, status):
         """
@@ -165,8 +188,10 @@ class BackgroundDictation:
     def _vad_processing_loop(self):
         """
         VAD processing thread.
-        Reads audio chunks, runs Silero VAD, detects speech start/end,
-        and enqueues complete speech segments for transcription.
+        Reads audio chunks, runs Silero VAD, detects speech start/end.
+        On the FIRST silence chunk after speech, fires a speculative Groq request so
+        the network round-trip overlaps with the silence_timeout wait. If speech
+        resumes within silence_timeout, the speculative result is discarded.
         """
         pre_speech_maxlen = max(
             1, int(self.config.pre_speech_buffer * SAMPLE_RATE / VAD_CHUNK_SAMPLES)
@@ -177,6 +202,7 @@ class BackgroundDictation:
         in_speech = False
         silence_start = None
         speech_start = None
+        pending_future: Optional[Future] = None  # speculative transcription in flight
 
         # Residual buffer for chunk alignment (sounddevice may deliver
         # different block sizes than VAD_CHUNK_SAMPLES)
@@ -211,6 +237,7 @@ class BackgroundDictation:
                         in_speech = True
                         speech_start = time.monotonic()
                         silence_start = None
+                        pending_future = None
                         speech_chunks = list(pre_speech_buffer)
                         pre_speech_buffer.clear()
                         speech_chunks.append(window.copy())
@@ -221,99 +248,109 @@ class BackgroundDictation:
 
                     if not is_speech:
                         if silence_start is None:
+                            # First silence chunk after speech — fire speculative request
                             silence_start = time.monotonic()
+                            speech_duration = silence_start - speech_start
+                            if speech_duration >= self.config.min_speech_duration:
+                                full_audio = np.concatenate(speech_chunks)
+                                pending_future = self.transcribe_executor.submit(
+                                    self._transcribe_audio,
+                                    self._audio_to_wav_bytes(full_audio),
+                                )
+                                print(f"[Spec] Submitted at silence start ({speech_duration:.1f}s)")
                         elif (time.monotonic() - silence_start) >= self.config.silence_timeout:
                             speech_duration = time.monotonic() - speech_start
                             print(f"[VAD] Speech ended ({speech_duration:.1f}s)")
 
-                            if speech_duration >= self.config.min_speech_duration:
-                                full_audio = np.concatenate(speech_chunks)
+                            if pending_future is not None:
+                                # Fast path — speculative request likely already in flight
                                 try:
-                                    self.speech_segment_queue.put(full_audio, timeout=5.0)
-                                except Exception:
-                                    print(
-                                        "[VAD] Transcription queue full, dropping segment"
+                                    self.speech_segment_queue.put(
+                                        pending_future, timeout=5.0
                                     )
+                                except Exception:
+                                    print("[VAD] Result queue full, dropping segment")
                             else:
-                                print(
-                                    f"[VAD] Too short ({speech_duration:.1f}s < "
-                                    f"{self.config.min_speech_duration}s), discarding"
+                                # Speech was too short for speculation; transcribe now
+                                full_audio = np.concatenate(speech_chunks)
+                                future = self.transcribe_executor.submit(
+                                    self._transcribe_audio,
+                                    self._audio_to_wav_bytes(full_audio),
                                 )
+                                try:
+                                    self.speech_segment_queue.put(future, timeout=5.0)
+                                except Exception:
+                                    print("[VAD] Result queue full, dropping segment")
 
                             # Reset state
                             in_speech = False
                             speech_chunks = []
                             silence_start = None
                             speech_start = None
+                            pending_future = None
                             self.vad_model.reset_states()
                     else:
+                        # Speech resumed before silence_timeout — discard speculation
+                        if pending_future is not None:
+                            print("[Spec] Discarded (speech resumed)")
+                            pending_future = None
                         silence_start = None
 
         print("[VAD] Processing loop exiting.")
 
     def _transcription_loop(self):
         """
-        Transcription thread.
-        Reads speech segments, saves as WAV, transcribes via Groq, and pastes.
+        Result-collection thread.
+        Pops futures from the queue (already in flight thanks to speculation) and
+        pastes the resolved text.
         """
         while not self.shutdown_event.is_set():
             try:
-                audio_data = self.speech_segment_queue.get(timeout=0.5)
+                future = self.speech_segment_queue.get(timeout=0.5)
             except Empty:
                 continue
 
-            if audio_data is None:
+            if future is None:
                 break
 
             try:
-                wav_path = self._save_wav(audio_data)
-                duration = len(audio_data) / SAMPLE_RATE
-                print(f"[Transcribe] Processing {duration:.1f}s of audio...")
-
                 t0 = time.monotonic()
-                text = self._transcribe_audio(wav_path)
-                latency = time.monotonic() - t0
+                text = future.result(timeout=30.0)
+                wait = time.monotonic() - t0
 
                 if text and text.strip():
                     print(f"\n{'=' * 40}")
                     print(f"  {text}")
                     print(f"{'=' * 40}")
-                    print(f"[Transcribe] {latency * 1000:.0f} ms\n")
+                    print(f"[Transcribe] waited {wait * 1000:.0f} ms after silence\n")
 
                     self._copy_to_clipboard(text + " ")
 
                     if self.config.auto_paste:
-                        time.sleep(0.1)
                         self._simulate_paste()
 
                     self.segments_transcribed += 1
                 else:
                     print("[Transcribe] Empty result, skipping.")
 
-                # Periodic cleanup
-                if self.segments_transcribed % 5 == 0:
-                    self._cleanup_old_recordings()
-
             except Exception as e:
                 print(f"[Transcribe] Error: {e}")
 
         print("[Transcribe] Transcription loop exiting.")
 
-    def _transcribe_audio(self, audio_file: Path) -> str:
-        """Transcribe an audio file via the Groq Whisper API (OpenAI-compatible)."""
-        with open(audio_file, "rb") as f:
-            params = {
-                "model": self.config.model,
-                "file": f,
-                "temperature": 0.0,
-                "response_format": "text",
-            }
-            if self.config.language:
-                params["language"] = self.config.language
-            if self.config.prompt:
-                params["prompt"] = self.config.prompt
-            response = self.client.audio.transcriptions.create(**params)
-        # response_format="text" returns a plain string
+    def _transcribe_audio(self, wav_bytes: bytes) -> str:
+        """Transcribe in-memory WAV bytes via the Groq Whisper API."""
+        params = {
+            "model": self.config.model,
+            "file": ("audio.wav", wav_bytes, "audio/wav"),
+            "temperature": 0.0,
+            "response_format": "text",
+        }
+        if self.config.language:
+            params["language"] = self.config.language
+        if self.config.prompt:
+            params["prompt"] = self.config.prompt
+        response = self.client.audio.transcriptions.create(**params)
         return response if isinstance(response, str) else response.text
 
     def _copy_to_clipboard(self, text: str) -> None:
@@ -339,33 +376,17 @@ class BackgroundDictation:
         except subprocess.CalledProcessError:
             print("Warning: Could not auto-paste. Check Terminal accessibility permissions.")
 
-    def _save_wav(self, audio_data: np.ndarray) -> Path:
-        """Save float32 numpy audio as 16-bit PCM WAV (what the Whisper API expects)."""
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        wav_path = self.temp_dir / f"bg_recording_{timestamp}.wav"
-
+    @staticmethod
+    def _audio_to_wav_bytes(audio_data: np.ndarray) -> bytes:
+        """Encode float32 numpy audio as 16-bit PCM WAV bytes (no disk roundtrip)."""
         audio_int16 = np.clip(audio_data * 32767, -32768, 32767).astype(np.int16)
-
-        with wave.open(str(wav_path), "wb") as wf:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as wf:
             wf.setnchannels(CHANNELS)
             wf.setsampwidth(2)  # 16-bit = 2 bytes
             wf.setframerate(SAMPLE_RATE)
             wf.writeframes(audio_int16.tobytes())
-
-        return wav_path
-
-    def _cleanup_old_recordings(self, keep_last: int = 10) -> None:
-        """Clean up old recording files."""
-        try:
-            recordings = sorted(
-                self.temp_dir.glob("bg_recording_*.wav"),
-                key=lambda f: f.stat().st_mtime,
-                reverse=True,
-            )
-            for recording in recordings[keep_last:]:
-                recording.unlink()
-        except Exception:
-            pass
+        return buf.getvalue()
 
     def run(self):
         """Start the always-on background dictation pipeline. Blocks until Ctrl+C."""
@@ -422,6 +443,7 @@ class BackgroundDictation:
 
         vad_thread.join(timeout=3.0)
         transcription_thread.join(timeout=10.0)
+        self.transcribe_executor.shutdown(wait=False, cancel_futures=True)
 
         print(f"Done. Transcribed {self.segments_transcribed} segment(s) this session.")
 

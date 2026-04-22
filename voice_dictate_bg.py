@@ -1,27 +1,29 @@
 #!/usr/bin/env python3
 """
-Always-On Background Voice Dictation with Silero VAD + Groq Whisper API
-=======================================================================
+Always-On Background Voice Dictation with Silero VAD + OpenAI Transcribe
+=========================================================================
 
-Continuously listens to your microphone using Silero VAD (Voice Activity Detection)
-to detect when you start and stop speaking. Speech segments are transcribed via
-Groq's hosted Whisper-large-v3-turbo, which typically returns in ~150-300 ms per
-clip — substantially faster than OpenAI's transcription endpoints.
+Continuously listens to your microphone using Silero VAD (Voice Activity
+Detection) to detect when you start and stop speaking. Speech segments are
+transcribed with OpenAI's speech-to-text models. The default is
+`gpt-4o-mini-transcribe` for a strong speed/accuracy balance; switch to
+`gpt-4o-transcribe` if you want the higher-quality option.
 
-Requires a free Groq API key from https://console.groq.com — set GROQ_API_KEY in
-your environment, drop it into a .env file, or pass --api-key.
+Set `OPENAI_API_KEY` in your environment, drop it into a `.env` file, or pass
+`--api-key`.
 
 Usage:
     uv run voice_dictate_bg.py                         # start with defaults
     uv run voice_dictate_bg.py --list-devices          # see available mics
     uv run voice_dictate_bg.py --vad-threshold 0.7     # stricter detection
-    uv run voice_dictate_bg.py --model whisper-large-v3
+    uv run voice_dictate_bg.py --model gpt-4o-transcribe
     uv run voice_dictate_bg.py --language fr           # transcribe French
     uv run voice_dictate_bg.py --no-paste              # clipboard only
 """
 
 import io
 import os
+import re
 import sys
 import time
 import wave
@@ -52,8 +54,6 @@ import torch
 import sounddevice as sd
 from silero_vad import load_silero_vad
 
-GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-
 # Audio format constants (must match Silero VAD requirements)
 SAMPLE_RATE = 16000
 CHANNELS = 1
@@ -67,9 +67,9 @@ DEFAULT_VAD_THRESHOLD = 0.5
 DEFAULT_SILENCE_TIMEOUT = 0.25  # how much trailing silence ends an utterance
 DEFAULT_MIN_SPEECH_DURATION = 0.2
 DEFAULT_PRE_SPEECH_BUFFER = 0.5
-# whisper-large-v3-turbo on Groq: ~150-300 ms per short clip, very accurate.
-# Alternative: "whisper-large-v3" (slightly slower, marginally better accuracy).
-DEFAULT_MODEL = "whisper-large-v3-turbo"
+# Default to the faster OpenAI transcription model; use gpt-4o-transcribe for
+# the more accurate option.
+DEFAULT_MODEL = "gpt-4o-mini-transcribe"
 DEFAULT_LANGUAGE = "en"
 
 
@@ -100,25 +100,33 @@ class VADConfig:
 
 
 class BackgroundDictation:
-    """Always-on background voice dictation using Silero VAD + Groq Whisper API."""
+    """Always-on background voice dictation using Silero VAD + OpenAI STT."""
 
     def __init__(self, config: VADConfig, api_key: Optional[str] = None):
         self.config = config
 
-        # Groq client (OpenAI-compatible)
-        self.api_key = api_key or os.environ.get("GROQ_API_KEY")
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
         if not self.api_key:
-            raise ValueError(
-                "Groq API key not found. Set GROQ_API_KEY environment variable, "
-                "add it to .env, or pass --api-key. Get a free key at https://console.groq.com."
+            has_legacy_groq_key = bool(os.environ.get("GROQ_API_KEY"))
+            legacy_hint = (
+                " Found GROQ_API_KEY in the environment/.env; rename it to "
+                "OPENAI_API_KEY or add an OpenAI key separately."
+                if has_legacy_groq_key
+                else ""
             )
-        self.client = OpenAI(api_key=self.api_key, base_url=GROQ_BASE_URL)
+            raise ValueError(
+                "OpenAI API key not found. Set OPENAI_API_KEY environment variable, "
+                "add it to .env, or pass --api-key."
+                + legacy_hint
+            )
+        self.client = OpenAI(api_key=self.api_key)
 
         # Load Silero VAD
         self.vad_model = None
         self._load_vad_model()
 
-        # Pre-warm the Groq connection so the first real dictation doesn't pay TLS setup
+        # Pre-warm the OpenAI connection so the first real dictation doesn't pay
+        # connection setup cost on the critical path.
         self._prewarm_connection()
 
         # Worker pool for speculative transcription (fire requests as soon as silence
@@ -149,8 +157,8 @@ class BackgroundDictation:
         print("Silero VAD model loaded.")
 
     def _prewarm_connection(self):
-        """Fire a tiny request to Groq so the first real dictation skips TLS handshake."""
-        print("Pre-warming Groq connection...")
+        """Fire a tiny request so the first real dictation skips cold-start work."""
+        print("Pre-warming OpenAI transcription connection...")
         try:
             tiny = self._audio_to_wav_bytes(np.zeros(1600, dtype=np.float32))  # 100ms silence
             t0 = time.monotonic()
@@ -189,7 +197,7 @@ class BackgroundDictation:
         """
         VAD processing thread.
         Reads audio chunks, runs Silero VAD, detects speech start/end.
-        On the FIRST silence chunk after speech, fires a speculative Groq request so
+        On the FIRST silence chunk after speech, fires a speculative OpenAI request so
         the network round-trip overlaps with the silence_timeout wait. If speech
         resumes within silence_timeout, the speculative result is discarded.
         """
@@ -317,14 +325,15 @@ class BackgroundDictation:
                 t0 = time.monotonic()
                 text = future.result(timeout=30.0)
                 wait = time.monotonic() - t0
+                cleaned_text = self._normalize_transcript_text(text)
 
-                if text and text.strip():
+                if cleaned_text:
                     print(f"\n{'=' * 40}")
-                    print(f"  {text}")
+                    print(f"  {cleaned_text}")
                     print(f"{'=' * 40}")
                     print(f"[Transcribe] waited {wait * 1000:.0f} ms after silence\n")
 
-                    self._copy_to_clipboard(text + " ")
+                    self._copy_to_clipboard(cleaned_text + " ")
 
                     if self.config.auto_paste:
                         self._simulate_paste()
@@ -339,7 +348,7 @@ class BackgroundDictation:
         print("[Transcribe] Transcription loop exiting.")
 
     def _transcribe_audio(self, wav_bytes: bytes) -> str:
-        """Transcribe in-memory WAV bytes via the Groq Whisper API."""
+        """Transcribe in-memory WAV bytes via the OpenAI speech-to-text API."""
         params = {
             "model": self.config.model,
             "file": ("audio.wav", wav_bytes, "audio/wav"),
@@ -352,6 +361,13 @@ class BackgroundDictation:
             params["prompt"] = self.config.prompt
         response = self.client.audio.transcriptions.create(**params)
         return response if isinstance(response, str) else response.text
+
+    @staticmethod
+    def _normalize_transcript_text(text: Optional[str]) -> str:
+        """Collapse model-added newlines and extra whitespace for inline dictation."""
+        if not text:
+            return ""
+        return re.sub(r"\s+", " ", text).strip()
 
     def _copy_to_clipboard(self, text: str) -> None:
         """Copy text to the system clipboard."""
@@ -391,7 +407,7 @@ class BackgroundDictation:
     def run(self):
         """Start the always-on background dictation pipeline. Blocks until Ctrl+C."""
         print("=" * 60)
-        print("  Background Voice Dictation (Silero VAD + Groq Whisper)")
+        print("  Background Voice Dictation (Silero VAD + OpenAI Transcribe)")
         print("=" * 60)
         print(f"  Model:            {self.config.model}")
         print(f"  Language:         {self.config.language}")
@@ -402,7 +418,6 @@ class BackgroundDictation:
         print(f"  Auto-paste:       {self.config.auto_paste}")
         print(f"  Audio device:     {self.config.device_index or 'system default'}")
         print("=" * 60)
-        print("Listening... speak naturally. Press Ctrl+C to stop.\n")
 
         vad_thread = threading.Thread(
             target=self._vad_processing_loop,
@@ -426,6 +441,7 @@ class BackgroundDictation:
                 device=self.config.device_index,
                 callback=self._audio_callback,
             ):
+                print("Listening... speak naturally. Press Ctrl+C to stop.\n")
                 while not self.shutdown_event.is_set():
                     self.shutdown_event.wait(timeout=0.5)
         except KeyboardInterrupt:
@@ -481,8 +497,8 @@ Examples:
         type=str,
         default=DEFAULT_MODEL,
         help=(
-            f"Groq Whisper model (default: {DEFAULT_MODEL}). "
-            "Options: whisper-large-v3-turbo, whisper-large-v3, distil-whisper-large-v3-en."
+            f"OpenAI transcription model (default: {DEFAULT_MODEL}). "
+            "Options: gpt-4o-mini-transcribe, gpt-4o-transcribe."
         ),
     )
     parser.add_argument(
@@ -527,7 +543,7 @@ Examples:
         default=DEFAULT_LANGUAGE,
         help=(
             f"Language code for transcription (default: {DEFAULT_LANGUAGE}). "
-            "Whisper supports ~99 languages; pass an ISO code like en, fr, de, es, ja."
+            "Pass an ISO code like en, fr, de, es, or ja."
         ),
     )
     parser.add_argument(
@@ -541,7 +557,7 @@ Examples:
         "--api-key",
         type=str,
         default=None,
-        help="Groq API key (otherwise uses GROQ_API_KEY env var or .env file)",
+        help="OpenAI API key (otherwise uses OPENAI_API_KEY env var or .env file)",
     )
     parser.add_argument(
         "--list-devices",
@@ -566,6 +582,23 @@ Examples:
         print("\nUse --device <index> to select a device.")
         sys.exit(0)
 
+    def validate_input_device(device_index: Optional[int]) -> None:
+        if device_index is None:
+            return
+        try:
+            dev = sd.query_devices(device_index, "input")
+        except Exception as exc:
+            raise ValueError(
+                f"Audio input device {device_index} is not available. "
+                "Run with --list-devices to see current indices, or omit --device "
+                "to auto-select the built-in mic."
+            ) from exc
+        if dev["max_input_channels"] <= 0:
+            raise ValueError(
+                f"Audio device {device_index} is not an input device. "
+                "Run with --list-devices to see current input-capable devices."
+            )
+
     # Auto-prefer the MacBook's built-in mic when no explicit device was passed,
     # because the Bose QC35 over Bluetooth tends to pick up an obnoxious squeal.
     device_index = args.device
@@ -575,6 +608,8 @@ Examples:
                 device_index = i
                 print(f"Auto-selected built-in mic: [{i}] {dev['name']}")
                 break
+    else:
+        validate_input_device(device_index)
 
     config = VADConfig(
         vad_threshold=args.vad_threshold,

@@ -7,22 +7,22 @@
 # ===== CONFIGURATION =====
 # Modify these values to customize your setup
 
-# API key is now loaded from .env file automatically
+# API key is loaded from .env automatically
 # You can still override by uncommenting the line below:
 # API_KEY="sk-your-key-here"
-PROJECT_DIR="$HOME/Voice_Dictate"        # Path to Voice Dictate project
-MODEL="gpt-4o-mini-transcribe"          # Options: whisper-1, gpt-4o-mini-transcribe, gpt-4o-transcribe
-LANGUAGE=""                              # Leave empty for auto-detect, or use: en, es, fr, de, zh, etc.
-AUTO_PASTE=true                          # true = auto-paste, false = copy only
-DEVICE=3                                 # Audio device index (3 = MacBook Pro Microphone)
+PROJECT_DIR="$HOME/Downloads/Voice_Dictate"  # Path to Voice Dictate project
+MODEL="gpt-4o-mini-transcribe"               # Options: gpt-4o-mini-transcribe, gpt-4o-transcribe
+LANGUAGE=""                                  # Leave empty for auto-detect, or use: en, es, fr, de, zh, etc.
+AUTO_PASTE=true                              # true = auto-paste, false = copy only
+DEVICE=""                                    # Leave empty to auto-select the built-in mic
 
 # VAD (Voice Activity Detection) settings
 VAD_THRESHOLD=0.5                        # 0.0-1.0, higher = stricter (raise if false triggers)
-SILENCE_TIMEOUT=1.5                      # Seconds of silence before ending an utterance
-MIN_SPEECH=0.5                           # Minimum speech duration (filters coughs/clicks)
+SILENCE_TIMEOUT=0.25                     # Seconds of silence before ending an utterance
+MIN_SPEECH=0.2                           # Minimum speech duration (filters coughs/clicks)
 
 # ===== SETUP PATH =====
-# Add Homebrew to PATH (required for ffmpeg and uv)
+# Add Homebrew to PATH (required for uv)
 
 # For Apple Silicon Macs (M1/M2/M3)
 if [[ -d "/opt/homebrew/bin" ]]; then
@@ -81,7 +81,12 @@ if [[ -f "$PIDFILE" ]]; then
 fi
 
 # Build command arguments
-CMD_ARGS="--model $MODEL --vad-threshold $VAD_THRESHOLD --silence-timeout $SILENCE_TIMEOUT --min-speech $MIN_SPEECH --device $DEVICE"
+CMD_ARGS="--model $MODEL --vad-threshold $VAD_THRESHOLD --silence-timeout $SILENCE_TIMEOUT --min-speech $MIN_SPEECH"
+
+# Add device if specified
+if [[ -n "$DEVICE" ]]; then
+    CMD_ARGS="$CMD_ARGS --device $DEVICE"
+fi
 
 # Add language if specified
 if [[ -n "$LANGUAGE" ]]; then

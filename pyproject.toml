@@ -1,7 +1,7 @@
 [project]
 name = "voice-dictate"
 version = "2.1.0"
-description = "Voice dictation tool for macOS using Groq's hosted Whisper API"
+description = "Voice dictation tool for macOS using OpenAI transcription models"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

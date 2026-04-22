@@ -1,6 +1,6 @@
 # Voice Dictate for macOS
 
-**Always-on voice dictation with OpenAI Whisper that works system-wide.**
+**Always-on voice dictation with OpenAI transcription models that works system-wide.**
 
 ## What It Does
 
@@ -18,7 +18,7 @@ No buttons to hold, no fixed timers. Works from **any app** — Chrome, Slack, N
 ### 1. Install Dependencies
 ```bash
 # Install required tools
-brew install ffmpeg uv
+brew install uv
 
 # Navigate to project and install Python packages
 cd ~/Downloads/Voice_Dictate
@@ -43,10 +43,10 @@ OPENAI_API_KEY=sk-your-key-here
 ### 4. Test It
 ```bash
 cd ~/Downloads/Voice_Dictate
-uv run voice_dictate_bg.py --device 3
+uv run voice_dictate_bg.py
 ```
 
-Speak a sentence, wait ~1.5 seconds, and your text should appear.
+Speak a sentence, pause briefly, and your text should appear.
 
 ---
 
@@ -56,14 +56,14 @@ Speak a sentence, wait ~1.5 seconds, and your text should appear.
 ```bash
 cd ~/Downloads/Voice_Dictate
 
-# Start with MacBook Pro mic
-uv run voice_dictate_bg.py --device 3
-
 # Start with system default mic
 uv run voice_dictate_bg.py
 
+# Start with a specific mic after checking indices
+uv run voice_dictate_bg.py --device 1
+
 # Clipboard only (no auto-paste)
-uv run voice_dictate_bg.py --device 3 --no-paste
+uv run voice_dictate_bg.py --no-paste
 
 # List available microphones
 uv run voice_dictate_bg.py --list-devices
@@ -91,14 +91,13 @@ The included `shortcut_script.sh` works as a toggle — press your shortcut once
 ```bash
 --model gpt-4o-mini-transcribe    # Fast, cheap (default)
 --model gpt-4o-transcribe         # Best quality
---model whisper-1                  # Original Whisper
 ```
 
 ### VAD Tuning
 ```bash
 --vad-threshold 0.5      # Speech confidence 0.0-1.0 (default: 0.5)
---silence-timeout 1.5    # Seconds of silence to end utterance (default: 1.5)
---min-speech 0.5         # Minimum speech duration in seconds (default: 0.5)
+--silence-timeout 0.25   # Seconds of silence to end utterance (default: 0.25)
+--min-speech 0.2         # Minimum speech duration in seconds (default: 0.2)
 ```
 
 ### Languages
@@ -114,8 +113,8 @@ The included `shortcut_script.sh` works as a toggle — press your shortcut once
 uv run voice_dictate_bg.py --list-devices
 
 # Use a specific device by index
-uv run voice_dictate_bg.py --device 3    # MacBook Pro Microphone
-uv run voice_dictate_bg.py --device 0    # Headset mic
+uv run voice_dictate_bg.py --device 1    # Example explicit input device
+uv run voice_dictate_bg.py --device 0    # Another example
 ```
 
 All of these can also be set in `shortcut_script.sh` for the shortcut workflow.
@@ -130,16 +129,11 @@ All of these can also be set in `shortcut_script.sh` for the shortcut workflow.
 
 ### Wrong microphone / fuzzy audio
 - Bluetooth headsets can switch to low-quality HFP mic mode
-- Use `--list-devices` to find your MacBook Pro mic index
-- Use `--device <index>` to select it (usually index 3)
+- Run without `--device` to let the app auto-select the built-in MacBook mic
+- Use `--list-devices` if you want to force a specific input index
 
 ### "No audio recorded"
 - Check microphone permissions in System Settings > Privacy & Security > Microphone
-
-### "Command not found: ffmpeg"
-- Install with: `brew install ffmpeg`
-
----
 
 ## Project Files
 
@@ -161,6 +155,6 @@ The app uses a 3-thread pipeline:
 
 1. **Audio Thread** — `sounddevice` streams mic input continuously
 2. **VAD Thread** — Silero VAD (a neural network) analyzes each 32ms audio chunk and detects speech vs. non-speech. Keyboard typing, AC, fans, etc. are ignored — only human voice triggers it.
-3. **Transcription Thread** — When speech ends (1.5s silence), the audio is sent to OpenAI's Whisper API, transcribed, and pasted into the active app.
+3. **Transcription Thread** — On the first silence chunk after speech, the app starts a speculative OpenAI transcription request so network latency overlaps the trailing-silence wait. Once the utterance is confirmed finished, the resolved text is pasted into the active app.
 
 All three run concurrently, so the app keeps listening even while a previous utterance is being transcribed.

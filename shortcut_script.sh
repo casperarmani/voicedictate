@@ -11,6 +11,7 @@
 # You can still override by uncommenting the line below:
 # API_KEY="sk-your-key-here"
 PROJECT_DIR="$HOME/Downloads/Voice_Dictate"  # Path to Voice Dictate project
+MODE="realtime"                              # Options: realtime, classic
 MODEL="gpt-4o-mini-transcribe"               # Options: gpt-4o-mini-transcribe, gpt-4o-transcribe
 LANGUAGE=""                                  # Leave empty for auto-detect, or use: en, es, fr, de, zh, etc.
 AUTO_PASTE=true                              # true = auto-paste, false = copy only
@@ -56,12 +57,7 @@ if ! cd "$PROJECT_DIR"; then
     exit 1
 fi
 
-# Check if UV is available
-if ! command -v uv &> /dev/null; then
-    echo "Error: UV package manager not found"
-    echo "Install with: curl -LsSf https://astral.sh/uv/install.sh | sh"
-    exit 1
-fi
+PYTHON_BIN="$PROJECT_DIR/.venv/bin/python"
 
 # ===== TOGGLE LOGIC =====
 # If already running, stop it. If not running, start it.
@@ -81,7 +77,7 @@ if [[ -f "$PIDFILE" ]]; then
 fi
 
 # Build command arguments
-CMD_ARGS="--model $MODEL --vad-threshold $VAD_THRESHOLD --silence-timeout $SILENCE_TIMEOUT --min-speech $MIN_SPEECH"
+CMD_ARGS="--mode $MODE --model $MODEL --vad-threshold $VAD_THRESHOLD --silence-timeout $SILENCE_TIMEOUT --min-speech $MIN_SPEECH"
 
 # Add device if specified
 if [[ -n "$DEVICE" ]]; then
@@ -99,17 +95,19 @@ if [[ "$AUTO_PASTE" != "true" ]]; then
 fi
 
 # Start background voice dictation
-uv run voice_dictate_bg.py $CMD_ARGS &
+if [[ -x "$PYTHON_BIN" ]]; then
+    "$PYTHON_BIN" voice_dictate_bg.py $CMD_ARGS &
+elif command -v uv &> /dev/null; then
+    uv run voice_dictate_bg.py $CMD_ARGS &
+else
+    echo "Error: No runnable environment found"
+    echo "Run 'uv sync' in $PROJECT_DIR, or install uv with: curl -LsSf https://astral.sh/uv/install.sh | sh"
+    exit 1
+fi
 BG_PID=$!
 
 # Save PID for toggle
 echo "$BG_PID" > "$PIDFILE"
-
-# Clean up PID file when the process exits
-(
-    wait "$BG_PID" 2>/dev/null
-    rm -f "$PIDFILE"
-) &
 
 echo "Voice Dictate started (PID: $BG_PID). Press shortcut again to stop."
 exit 0

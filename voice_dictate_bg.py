@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 """
-Always-On Background Voice Dictation with Silero VAD + OpenAI Transcribe
-=========================================================================
+Always-On Background Voice Dictation with OpenAI Transcription
+==============================================================
 
-Continuously listens to your microphone using Silero VAD (Voice Activity
-Detection) to detect when you start and stop speaking. Speech segments are
-transcribed with OpenAI's speech-to-text models. The default is
-`gpt-4o-mini-transcribe` for a strong speed/accuracy balance; switch to
-`gpt-4o-transcribe` if you want the higher-quality option.
+Supports two modes:
+- `classic`: local Silero VAD + `/audio/transcriptions`
+- `realtime`: OpenAI Realtime transcription sessions with server-side VAD
+
+The default speech-to-text model is `gpt-4o-mini-transcribe` for a strong
+speed/accuracy balance; switch to `gpt-4o-transcribe` if you want the
+higher-quality option.
 
 Set `OPENAI_API_KEY` in your environment, drop it into a `.env` file, or pass
 `--api-key`.
 
 Usage:
-    uv run voice_dictate_bg.py                         # start with defaults
+    uv run voice_dictate_bg.py                         # start Realtime STT
+    uv run voice_dictate_bg.py --mode classic         # local Silero VAD mode
     uv run voice_dictate_bg.py --list-devices          # see available mics
     uv run voice_dictate_bg.py --vad-threshold 0.7     # stricter detection
     uv run voice_dictate_bg.py --model gpt-4o-transcribe
@@ -21,6 +24,7 @@ Usage:
     uv run voice_dictate_bg.py --no-paste              # clipboard only
 """
 
+import base64
 import io
 import os
 import re
@@ -71,6 +75,10 @@ DEFAULT_PRE_SPEECH_BUFFER = 0.5
 # the more accurate option.
 DEFAULT_MODEL = "gpt-4o-mini-transcribe"
 DEFAULT_LANGUAGE = "en"
+DEFAULT_MODE = "realtime"
+REALTIME_API_SAMPLE_RATE = 24000
+REALTIME_CAPTURE_SAMPLE_RATE = SAMPLE_RATE
+REALTIME_BLOCK_SAMPLES = VAD_CHUNK_SAMPLES * 2
 
 
 class VADConfig:
@@ -87,6 +95,7 @@ class VADConfig:
         auto_paste: bool = True,
         language: Optional[str] = DEFAULT_LANGUAGE,
         prompt: Optional[str] = None,
+        mode: str = DEFAULT_MODE,
     ):
         self.vad_threshold = vad_threshold
         self.silence_timeout = silence_timeout
@@ -97,10 +106,11 @@ class VADConfig:
         self.auto_paste = auto_paste
         self.language = language
         self.prompt = prompt
+        self.mode = mode
 
 
-class BackgroundDictation:
-    """Always-on background voice dictation using Silero VAD + OpenAI STT."""
+class OpenAIDictationBase:
+    """Shared OpenAI/client and paste helpers for dictation modes."""
 
     def __init__(self, config: VADConfig, api_key: Optional[str] = None):
         self.config = config
@@ -121,6 +131,52 @@ class BackgroundDictation:
             )
         self.client = OpenAI(api_key=self.api_key)
 
+        # Shutdown coordination
+        self.shutdown_event = threading.Event()
+
+        # Pause/resume support (for future hotkey integration)
+        self.paused = threading.Event()
+
+        # Stats
+        self.segments_transcribed = 0
+
+    @staticmethod
+    def _normalize_transcript_text(text: Optional[str]) -> str:
+        """Collapse model-added newlines and extra whitespace for inline dictation."""
+        if not text:
+            return ""
+        return re.sub(r"\s+", " ", text).strip()
+
+    def _copy_to_clipboard(self, text: str) -> None:
+        """Copy text to the system clipboard."""
+        try:
+            pyperclip.copy(text)
+        except Exception:
+            subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
+
+    def _simulate_paste(self) -> None:
+        """Simulate Cmd+V to paste clipboard content."""
+        try:
+            applescript = '''
+            tell application "System Events"
+                keystroke "v" using command down
+            end tell
+            '''
+            subprocess.run(
+                ["osascript", "-e", applescript],
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError:
+            print("Warning: Could not auto-paste. Check Terminal accessibility permissions.")
+
+
+class BackgroundDictation(OpenAIDictationBase):
+    """Classic always-on dictation using Silero VAD + `/audio/transcriptions`."""
+
+    def __init__(self, config: VADConfig, api_key: Optional[str] = None):
+        super().__init__(config=config, api_key=api_key)
+
         # Load Silero VAD
         self.vad_model = None
         self._load_vad_model()
@@ -139,15 +195,6 @@ class BackgroundDictation:
         self.audio_chunk_queue: Queue = Queue(maxsize=200)
         # Queue items are now Futures resolving to transcribed text.
         self.speech_segment_queue: "Queue[Optional[Future]]" = Queue(maxsize=10)
-
-        # Shutdown coordination
-        self.shutdown_event = threading.Event()
-
-        # Pause/resume support (for future hotkey integration)
-        self.paused = threading.Event()
-
-        # Stats
-        self.segments_transcribed = 0
 
     def _load_vad_model(self):
         """Load Silero VAD model."""
@@ -363,36 +410,6 @@ class BackgroundDictation:
         return response if isinstance(response, str) else response.text
 
     @staticmethod
-    def _normalize_transcript_text(text: Optional[str]) -> str:
-        """Collapse model-added newlines and extra whitespace for inline dictation."""
-        if not text:
-            return ""
-        return re.sub(r"\s+", " ", text).strip()
-
-    def _copy_to_clipboard(self, text: str) -> None:
-        """Copy text to the system clipboard."""
-        try:
-            pyperclip.copy(text)
-        except Exception:
-            subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=True)
-
-    def _simulate_paste(self) -> None:
-        """Simulate Cmd+V to paste clipboard content."""
-        try:
-            applescript = '''
-            tell application "System Events"
-                keystroke "v" using command down
-            end tell
-            '''
-            subprocess.run(
-                ["osascript", "-e", applescript],
-                check=True,
-                capture_output=True,
-            )
-        except subprocess.CalledProcessError:
-            print("Warning: Could not auto-paste. Check Terminal accessibility permissions.")
-
-    @staticmethod
     def _audio_to_wav_bytes(audio_data: np.ndarray) -> bytes:
         """Encode float32 numpy audio as 16-bit PCM WAV bytes (no disk roundtrip)."""
         audio_int16 = np.clip(audio_data * 32767, -32768, 32767).astype(np.int16)
@@ -464,15 +481,336 @@ class BackgroundDictation:
         print(f"Done. Transcribed {self.segments_transcribed} segment(s) this session.")
 
 
+class RealtimeDictation(OpenAIDictationBase):
+    """Dictation using OpenAI Realtime transcription sessions with server-side VAD."""
+
+    def __init__(self, config: VADConfig, api_key: Optional[str] = None):
+        super().__init__(config=config, api_key=api_key)
+        self.audio_chunk_queue: Queue = Queue(maxsize=200)
+        self.connection_ready = threading.Event()
+        self.connection_error: Optional[Exception] = None
+        self.connection_lock = threading.Lock()
+        self.connection = None
+        self.commit_order = collections.deque()
+        self.committed_at: dict[str, float] = {}
+        self.completed_transcripts: dict[str, str] = {}
+        self.failed_items: set[str] = set()
+
+    def _selected_device_name(self) -> str:
+        """Best-effort device name lookup for logging and noise-reduction hints."""
+        try:
+            if self.config.device_index is not None:
+                return str(sd.query_devices(self.config.device_index)["name"])
+            default_device = sd.default.device[0]
+            if default_device is None or default_device < 0:
+                return "system default"
+            return str(sd.query_devices(default_device)["name"])
+        except Exception:
+            return "system default"
+
+    def _noise_reduction_type(self) -> str:
+        """Choose a default noise-reduction profile based on the selected mic."""
+        name = self._selected_device_name().lower()
+        if "macbook" in name or "built-in" in name or "internal" in name:
+            return "far_field"
+        return "near_field"
+
+    def _build_realtime_session(self) -> dict:
+        """Build the OpenAI Realtime transcription session config."""
+        transcription: dict[str, str] = {"model": self.config.model}
+        if self.config.language:
+            transcription["language"] = self.config.language
+        if self.config.prompt:
+            transcription["prompt"] = self.config.prompt
+
+        return {
+            "type": "transcription",
+            "audio": {
+                "input": {
+                    "format": {"type": "audio/pcm", "rate": REALTIME_API_SAMPLE_RATE},
+                    "noise_reduction": {"type": self._noise_reduction_type()},
+                    "transcription": transcription,
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": self.config.vad_threshold,
+                        "prefix_padding_ms": max(0, int(self.config.pre_speech_buffer * 1000)),
+                        "silence_duration_ms": max(100, int(self.config.silence_timeout * 1000)),
+                    },
+                }
+            },
+        }
+
+    def _audio_callback(self, indata, frames, time_info, status):
+        """Copy audio data into the queue; the sender thread streams it to Realtime."""
+        if status:
+            print(f"[Audio] {status}", file=sys.stderr)
+
+        if self.shutdown_event.is_set():
+            raise sd.CallbackAbort
+
+        if self.paused.is_set():
+            return
+
+        audio_chunk = indata[:, 0].copy()
+        try:
+            self.audio_chunk_queue.put_nowait(audio_chunk)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _resample_audio(audio_data: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+        """Resample float32 mono audio using linear interpolation."""
+        if src_rate == dst_rate or len(audio_data) == 0:
+            return audio_data.astype(np.float32, copy=False)
+
+        dst_length = max(1, round(len(audio_data) * dst_rate / src_rate))
+        src_positions = np.arange(len(audio_data), dtype=np.float32)
+        dst_positions = np.linspace(0, len(audio_data) - 1, num=dst_length, dtype=np.float32)
+        return np.interp(dst_positions, src_positions, audio_data).astype(np.float32)
+
+    @classmethod
+    def _audio_chunk_to_base64(cls, audio_data: np.ndarray, src_rate: int) -> str:
+        """Encode float32 audio to base64 PCM16 for Realtime input_audio_buffer.append."""
+        resampled = cls._resample_audio(audio_data, src_rate=src_rate, dst_rate=REALTIME_API_SAMPLE_RATE)
+        audio_int16 = np.clip(resampled * 32767, -32768, 32767).astype(np.int16)
+        return base64.b64encode(audio_int16.tobytes()).decode("ascii")
+
+    def _flush_completed_transcripts(self) -> None:
+        """Emit completed transcripts in commit order, even if events arrive out of order."""
+        while self.commit_order:
+            item_id = self.commit_order[0]
+
+            if item_id in self.failed_items:
+                self.failed_items.remove(item_id)
+                self.commit_order.popleft()
+                self.committed_at.pop(item_id, None)
+                self.completed_transcripts.pop(item_id, None)
+                continue
+
+            transcript = self.completed_transcripts.get(item_id)
+            if transcript is None:
+                break
+
+            self.commit_order.popleft()
+            self.completed_transcripts.pop(item_id, None)
+            committed_at = self.committed_at.pop(item_id, None)
+            cleaned_text = self._normalize_transcript_text(transcript)
+
+            if cleaned_text:
+                print(f"\n{'=' * 40}")
+                print(f"  {cleaned_text}")
+                print(f"{'=' * 40}")
+                if committed_at is not None:
+                    elapsed_ms = (time.monotonic() - committed_at) * 1000
+                    print(f"[Realtime] waited {elapsed_ms:.0f} ms after commit\n")
+                else:
+                    print("[Realtime] completed\n")
+
+                self._copy_to_clipboard(cleaned_text + " ")
+
+                if self.config.auto_paste:
+                    self._simulate_paste()
+
+                self.segments_transcribed += 1
+            else:
+                print("[Realtime] Empty result, skipping.")
+
+    def _handle_realtime_event(self, event) -> None:
+        """Handle the subset of Realtime events relevant to transcription dictation."""
+        event_type = event.type
+
+        if event_type == "session.created":
+            return
+
+        if event_type == "session.updated":
+            print("Realtime transcription session ready.")
+            self.connection_ready.set()
+            return
+
+        if event_type == "input_audio_buffer.speech_started":
+            print("[RT] Speech started")
+            return
+
+        if event_type == "input_audio_buffer.speech_stopped":
+            print("[RT] Speech stopped")
+            return
+
+        if event_type == "input_audio_buffer.committed":
+            self.commit_order.append(event.item_id)
+            self.committed_at[event.item_id] = time.monotonic()
+            self._flush_completed_transcripts()
+            return
+
+        if event_type == "conversation.item.input_audio_transcription.delta":
+            return
+
+        if event_type == "conversation.item.input_audio_transcription.completed":
+            self.completed_transcripts[event.item_id] = event.transcript
+            self._flush_completed_transcripts()
+            return
+
+        if event_type == "conversation.item.input_audio_transcription.failed":
+            self.failed_items.add(event.item_id)
+            print(f"[Realtime] Transcription failed for {event.item_id}")
+            self._flush_completed_transcripts()
+            return
+
+        if event_type == "error":
+            message = getattr(getattr(event, "error", None), "message", None) or str(event)
+            if self.connection_error is None:
+                self.connection_error = RuntimeError(message)
+            print(f"[Realtime] Error: {message}")
+            self.connection_ready.set()
+
+    def _event_loop(self) -> None:
+        """Receive and dispatch Realtime events until the connection is closed."""
+        try:
+            with self.client.realtime.connect(extra_query={"intent": "transcription"}) as connection:
+                with self.connection_lock:
+                    self.connection = connection
+
+                connection.session.update(session=self._build_realtime_session())
+
+                for event in connection:
+                    self._handle_realtime_event(event)
+                    if self.shutdown_event.is_set():
+                        break
+        except Exception as exc:
+            message = str(exc)
+            if "openai[realtime]" in message:
+                exc = RuntimeError(
+                    "OpenAI Realtime dependencies are missing. Run `uv sync` in the project directory."
+                )
+            self.connection_error = exc
+            if not self.shutdown_event.is_set():
+                print(f"[Realtime] Connection error: {exc}")
+            self.connection_ready.set()
+        finally:
+            with self.connection_lock:
+                self.connection = None
+            self.connection_ready.set()
+
+    def _audio_sender_loop(self) -> None:
+        """Stream queued mic audio chunks to the OpenAI Realtime input buffer."""
+        while not self.shutdown_event.is_set():
+            try:
+                chunk = self.audio_chunk_queue.get(timeout=0.1)
+            except Empty:
+                continue
+
+            if chunk is None:
+                break
+
+            with self.connection_lock:
+                connection = self.connection
+
+            if connection is None:
+                if self.shutdown_event.is_set():
+                    break
+                continue
+
+            try:
+                connection.input_audio_buffer.append(
+                    audio=self._audio_chunk_to_base64(
+                        chunk,
+                        src_rate=REALTIME_CAPTURE_SAMPLE_RATE,
+                    )
+                )
+            except Exception as exc:
+                self.connection_error = exc
+                if not self.shutdown_event.is_set():
+                    print(f"[Realtime] Audio send error: {exc}")
+                self.shutdown_event.set()
+                break
+
+    def _close_connection(self) -> None:
+        """Close the active Realtime websocket connection, if any."""
+        with self.connection_lock:
+            connection = self.connection
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+
+    def run(self):
+        """Start the Realtime transcription dictation pipeline. Blocks until Ctrl+C."""
+        print("=" * 60)
+        print("  Background Voice Dictation (OpenAI Realtime Transcribe)")
+        print("=" * 60)
+        print(f"  Model:            {self.config.model}")
+        print(f"  Mode:             realtime")
+        print(f"  Language:         {self.config.language}")
+        print(f"  VAD threshold:    {self.config.vad_threshold}")
+        print(f"  Silence timeout:  {self.config.silence_timeout}s")
+        print(f"  Pre-speech buf:   {self.config.pre_speech_buffer}s")
+        print(f"  Auto-paste:       {self.config.auto_paste}")
+        print(f"  Audio device:     {self.config.device_index or 'system default'}")
+        print("=" * 60)
+
+        event_thread = threading.Thread(
+            target=self._event_loop,
+            name="realtime-events",
+            daemon=True,
+        )
+        sender_thread = threading.Thread(
+            target=self._audio_sender_loop,
+            name="realtime-audio-sender",
+            daemon=True,
+        )
+        event_thread.start()
+
+        if not self.connection_ready.wait(timeout=10.0):
+            raise RuntimeError("Timed out waiting for the OpenAI Realtime session to initialize.")
+        if self.connection_error is not None:
+            raise self.connection_error
+
+        sender_thread.start()
+
+        try:
+            with sd.InputStream(
+                samplerate=REALTIME_CAPTURE_SAMPLE_RATE,
+                channels=CHANNELS,
+                dtype=DTYPE,
+                blocksize=REALTIME_BLOCK_SAMPLES,
+                device=self.config.device_index,
+                callback=self._audio_callback,
+            ):
+                print("Listening... speak naturally. Press Ctrl+C to stop.\n")
+                while not self.shutdown_event.is_set():
+                    if self.connection_error is not None:
+                        raise self.connection_error
+                    self.shutdown_event.wait(timeout=0.5)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self._shutdown(event_thread, sender_thread)
+
+    def _shutdown(self, event_thread, sender_thread):
+        """Gracefully shut down the Realtime threads and websocket connection."""
+        print("\nShutting down...")
+        self.shutdown_event.set()
+        self.audio_chunk_queue.put(None)
+        self._close_connection()
+
+        sender_thread.join(timeout=3.0)
+        event_thread.join(timeout=5.0)
+
+        print(f"Done. Transcribed {self.segments_transcribed} segment(s) this session.")
+
+
 def main():
     """Entry point for background voice dictation."""
     parser = argparse.ArgumentParser(
-        description="Always-on background voice dictation with Silero VAD",
+        description="Always-on background voice dictation with classic and Realtime OpenAI STT",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Start with defaults
+  # Start with defaults (Realtime transcription mode)
   uv run voice_dictate_bg.py
+
+  # Classic local Silero VAD mode
+  uv run voice_dictate_bg.py --mode classic
 
   # More sensitive detection
   uv run voice_dictate_bg.py --vad-threshold 0.3
@@ -502,28 +840,49 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--mode",
+        choices=["classic", "realtime"],
+        default=DEFAULT_MODE,
+        help=(
+            "Dictation mode. 'classic' uses local Silero VAD plus /audio/transcriptions; "
+            f"'realtime' uses OpenAI Realtime transcription sessions (default: {DEFAULT_MODE})."
+        ),
+    )
+    parser.add_argument(
         "--vad-threshold",
         type=float,
         default=DEFAULT_VAD_THRESHOLD,
-        help=f"VAD confidence threshold 0.0-1.0 (default: {DEFAULT_VAD_THRESHOLD})",
+        help=(
+            f"VAD confidence threshold 0.0-1.0 (default: {DEFAULT_VAD_THRESHOLD}). "
+            "In realtime mode this is passed to OpenAI server_vad."
+        ),
     )
     parser.add_argument(
         "--silence-timeout",
         type=float,
         default=DEFAULT_SILENCE_TIMEOUT,
-        help=f"Seconds of silence to end utterance (default: {DEFAULT_SILENCE_TIMEOUT})",
+        help=(
+            f"Seconds of silence to end utterance (default: {DEFAULT_SILENCE_TIMEOUT}). "
+            "In realtime mode this controls server_vad silence_duration_ms."
+        ),
     )
     parser.add_argument(
         "--min-speech",
         type=float,
         default=DEFAULT_MIN_SPEECH_DURATION,
-        help=f"Minimum speech duration in seconds (default: {DEFAULT_MIN_SPEECH_DURATION})",
+        help=(
+            f"Minimum speech duration in seconds (default: {DEFAULT_MIN_SPEECH_DURATION}). "
+            "Used only in classic mode."
+        ),
     )
     parser.add_argument(
         "--pre-buffer",
         type=float,
         default=DEFAULT_PRE_SPEECH_BUFFER,
-        help=f"Pre-speech buffer in seconds (default: {DEFAULT_PRE_SPEECH_BUFFER})",
+        help=(
+            f"Pre-speech buffer in seconds (default: {DEFAULT_PRE_SPEECH_BUFFER}). "
+            "In realtime mode this maps to server_vad prefix padding."
+        ),
     )
     parser.add_argument(
         "--device",
@@ -621,20 +980,22 @@ Examples:
         auto_paste=not args.no_paste,
         language=args.language,
         prompt=args.prompt,
+        mode=args.mode,
     )
 
-    bg = None
+    app = None
 
     def signal_handler(sig, frame):
-        if bg is not None:
-            bg.shutdown_event.set()
+        if app is not None:
+            app.shutdown_event.set()
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
     try:
-        bg = BackgroundDictation(config=config, api_key=args.api_key)
-        bg.run()
+        dictation_cls = RealtimeDictation if args.mode == "realtime" else BackgroundDictation
+        app = dictation_cls(config=config, api_key=args.api_key)
+        app.run()
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(1)

@@ -1,11 +1,11 @@
 # Voice Dictate for macOS
 
-**Always-on voice dictation with OpenAI transcription models that works system-wide.**
+**Always-on voice dictation with classic and Realtime OpenAI transcription modes that works system-wide.**
 
 ## What It Does
 
 1. **Start listening** (via shortcut or terminal command)
-2. **Just talk** — Silero VAD automatically detects when you start and stop speaking
+2. **Just talk** — use local VAD (`classic`) or OpenAI server-side VAD (`realtime`)
 3. **Text appears** wherever your cursor is — transcribed and pasted automatically
 4. **Keep talking** — it keeps listening for your next utterance
 
@@ -24,6 +24,8 @@ brew install uv
 cd ~/Downloads/Voice_Dictate
 uv sync
 ```
+
+If you already had the project checked out before Realtime mode was added, run `uv sync` again to install the websocket dependency.
 
 ### 2. Add Your OpenAI API Key
 Create a `.env` file in the project directory:
@@ -46,7 +48,7 @@ cd ~/Downloads/Voice_Dictate
 uv run voice_dictate_bg.py
 ```
 
-Speak a sentence, pause briefly, and your text should appear.
+This starts Realtime transcription mode by default. Speak a sentence, pause briefly, and your text should appear.
 
 ---
 
@@ -56,8 +58,11 @@ Speak a sentence, pause briefly, and your text should appear.
 ```bash
 cd ~/Downloads/Voice_Dictate
 
-# Start with system default mic
+# Start with system default mic in Realtime mode
 uv run voice_dictate_bg.py
+
+# Start in classic local VAD mode
+uv run voice_dictate_bg.py --mode classic
 
 # Start with a specific mic after checking indices
 uv run voice_dictate_bg.py --device 1
@@ -87,6 +92,12 @@ The included `shortcut_script.sh` works as a toggle — press your shortcut once
 
 ## Configuration
 
+### Modes
+```bash
+--mode realtime    # OpenAI Realtime transcription session + server-side VAD (default)
+--mode classic     # Local Silero VAD + /audio/transcriptions
+```
+
 ### Transcription Models
 ```bash
 --model gpt-4o-mini-transcribe    # Fast, cheap (default)
@@ -99,6 +110,8 @@ The included `shortcut_script.sh` works as a toggle — press your shortcut once
 --silence-timeout 0.25   # Seconds of silence to end utterance (default: 0.25)
 --min-speech 0.2         # Minimum speech duration in seconds (default: 0.2)
 ```
+
+`--vad-threshold`, `--silence-timeout`, and `--pre-buffer` map to OpenAI `server_vad` settings in Realtime mode.
 
 ### Languages
 ```bash
@@ -139,7 +152,7 @@ All of these can also be set in `shortcut_script.sh` for the shortcut workflow.
 
 ```
 Voice_Dictate/
-├── voice_dictate_bg.py    # Main app (background VAD listener)
+├── voice_dictate_bg.py    # Main app (classic + realtime dictation modes)
 ├── shortcut_script.sh     # macOS Shortcuts toggle script
 ├── pyproject.toml         # Dependencies
 ├── .env                   # Your API key
@@ -151,10 +164,14 @@ Voice_Dictate/
 
 ## How It Works
 
+### Classic Mode
+
 The app uses a 3-thread pipeline:
 
 1. **Audio Thread** — `sounddevice` streams mic input continuously
 2. **VAD Thread** — Silero VAD (a neural network) analyzes each 32ms audio chunk and detects speech vs. non-speech. Keyboard typing, AC, fans, etc. are ignored — only human voice triggers it.
 3. **Transcription Thread** — On the first silence chunk after speech, the app starts a speculative OpenAI transcription request so network latency overlaps the trailing-silence wait. Once the utterance is confirmed finished, the resolved text is pasted into the active app.
 
-All three run concurrently, so the app keeps listening even while a previous utterance is being transcribed.
+### Realtime Mode
+
+The app opens an OpenAI Realtime transcription session, streams microphone audio continuously, lets OpenAI server-side VAD detect turn boundaries, and pastes each final completed transcript in commit order.

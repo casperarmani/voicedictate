@@ -79,6 +79,9 @@ temp/
 # PID file (background mode toggle)
 .voice_dictate_bg.pid
 
+# Runtime debug log
+voice_dictate.log*
+
 # Audio files (recordings)
 *.wav
 *.mp3

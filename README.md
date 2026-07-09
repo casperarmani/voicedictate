@@ -21,7 +21,7 @@ No buttons to hold, no fixed timers. Works from **any app** — Chrome, Slack, N
 brew install uv
 
 # Navigate to project and install Python packages
-cd ~/Downloads/Voice_Dictate
+cd ~/Desktop/voicedictate
 uv sync
 ```
 
@@ -44,7 +44,7 @@ OPENAI_API_KEY=sk-your-key-here
 
 ### 4. Test It
 ```bash
-cd ~/Downloads/Voice_Dictate
+cd ~/Desktop/voicedictate
 uv run voice_dictate_bg.py
 ```
 
@@ -56,7 +56,7 @@ This starts Realtime transcription mode by default. Speak a sentence, pause brie
 
 ### From Terminal
 ```bash
-cd ~/Downloads/Voice_Dictate
+cd ~/Desktop/voicedictate
 
 # Start with system default mic in Realtime mode
 uv run voice_dictate_bg.py
@@ -148,14 +148,22 @@ All of these can also be set in `shortcut_script.sh` for the shortcut workflow.
 ### "No audio recorded"
 - Check microphone permissions in System Settings > Privacy & Security > Microphone
 
+### Dictation stopped or froze mid-session
+- Check the debug log: `tail -50 voice_dictate.log` (timestamped, includes reconnect activity)
+- Realtime sessions auto-reconnect on network drops and are rotated roughly every
+  20 minutes (during a quiet moment) so OpenAI's session-duration cap never cuts
+  one off. If transcription pauses for a second or two and resumes, that was a
+  reconnect — check the log if it never resumes.
+
 ## Project Files
 
 ```
-Voice_Dictate/
+voicedictate/
 ├── voice_dictate_bg.py    # Main app (classic + realtime dictation modes)
 ├── shortcut_script.sh     # macOS Shortcuts toggle script
 ├── pyproject.toml         # Dependencies
 ├── .env                   # Your API key
+├── voice_dictate.log      # Timestamped runtime/debug log (auto-created)
 ├── .gitignore             # Git safety
 └── README.md              # This file
 ```
@@ -175,3 +183,9 @@ The app uses a 3-thread pipeline:
 ### Realtime Mode
 
 The app opens an OpenAI Realtime transcription session, streams microphone audio continuously, lets OpenAI server-side VAD detect turn boundaries, and pastes each final completed transcript in commit order.
+
+A supervisor loop keeps the session alive indefinitely:
+- Any websocket drop (network blip, sleep/wake, server-side session cap) triggers an automatic reconnect with a freshly configured session.
+- Healthy sessions are proactively rotated after ~20 minutes, but only during a quiet moment, so the server's max-session-duration limit never kills one mid-sentence.
+- A committed utterance whose transcript never arrives is skipped after 10s instead of blocking everything dictated after it.
+- Clipboard/paste run on a dedicated thread with hard timeouts, so a hung `osascript` can never freeze the pipeline.

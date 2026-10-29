@@ -91,7 +91,7 @@ final class AppState: ObservableObject {
             micGranted = true
             wantsListening = true
             engine.start()
-            NSSound(named: "Tink")?.play()
+            NSSound(named: "Pop")?.play()
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { granted in
                 Task { @MainActor in

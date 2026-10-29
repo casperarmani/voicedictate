@@ -87,3 +87,6 @@ voice_dictate.log*
 *.mp3
 *.m4a
 recordings/
+# Swift app build output
+mac/.build/
+mac/build/

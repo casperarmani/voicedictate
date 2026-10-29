@@ -13,7 +13,36 @@ No buttons to hold, no fixed timers. Works from **any app** — Chrome, Slack, N
 
 ---
 
-## Quick Setup
+## Mac App (recommended)
+
+`mac/` contains a native Mac app, **Voice Dictate.app**, with the same always-on behaviour and no Terminal:
+
+- Open the app → it starts listening. Quit → it stops. **F5 (the mic key)** pauses/resumes.
+- Window + menu bar icon show whether it's listening; recent transcripts are listed in the window.
+- Uses OpenAI `gpt-live-transcribe` (streams while you talk). Speech is detected on your Mac
+  (Silero VAD), and only speech is sent to OpenAI.
+- Reconnects automatically (including after sleep) and replays any unfinished sentence, so
+  dropped connections don't lose text. Your clipboard is restored after each paste.
+
+```bash
+cd ~/Desktop/voicedictate/mac
+./build.sh          # builds, signs, installs to /Applications, opens it
+```
+
+First launch: allow **Microphone**, and turn on **Voice Dictate** under
+System Settings → Privacy & Security → **Accessibility** (needed for pasting and F5).
+Then set System Settings → Keyboard → Dictation → Shortcut to anything other than the
+microphone key, so Apple Dictation doesn't also react to F5.
+
+The API key is read once from `.env` into the macOS Keychain by `build.sh` (or paste it in the app).
+Logs: `~/Library/Logs/VoiceDictate/VoiceDictate.log`.
+Pipeline test without a mic: `mac/.build/debug/VoiceDictate --test [--drop] clip1.wav clip2.wav`.
+
+The Python script below still works as a fallback.
+
+---
+
+## Quick Setup (Python script)
 
 ### 1. Install Dependencies
 ```bash

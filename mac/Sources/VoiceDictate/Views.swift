@@ -38,11 +38,12 @@ struct MenuContent: View {
 
 @MainActor func statusTitle(_ state: AppState) -> String {
     if let m = state.fatalMessage { return m }
-    if !state.hasAPIKey { return "Add your OpenAI API key" }
+    if state.needsAPIKey { return "Add your OpenAI API key" }
     if state.wantsListening && !state.micGranted { return "Microphone access needed" }
     switch state.status {
     case .stopped: return "Paused"
     case .connecting: return "Connecting…"
+    case .loadingModel: return "Loading speech model…"
     case .listening: return state.speaking ? "Hearing you…" : "Listening"
     case .reconnecting: return "Reconnecting…"
     case .error(let e): return e
@@ -66,14 +67,14 @@ struct MainView: View {
     }
 
     private var needsSetup: Bool {
-        !state.hasAPIKey || !state.micGranted || !state.accessibilityGranted || !state.micKeyActive
+        state.needsAPIKey || !state.micGranted || !state.accessibilityGranted || !state.micKeyActive
     }
 
     private var color: Color {
         guard state.wantsListening else { return .secondary }
         switch state.status {
         case .listening: return .red
-        case .connecting, .reconnecting: return .orange
+        case .connecting, .reconnecting, .loadingModel: return .orange
         case .error: return .yellow
         case .stopped: return .secondary
         }
@@ -98,14 +99,14 @@ struct MainView: View {
             Spacer()
             Button(state.wantsListening ? "Pause" : "Start") { state.toggle() }
                 .controlSize(.large)
-                .disabled(!state.hasAPIKey)
+                .disabled(state.needsAPIKey)
         }
         .padding(18)
     }
 
     private var setup: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if !state.hasAPIKey { APIKeyField() }
+            if state.needsAPIKey { APIKeyField() }
             if !state.micGranted {
                 SetupRow(ok: false, title: "Microphone access", detail: "Needed to hear you.",
                          action: "Open Settings") { Permissions.openMicrophoneSettings() }
@@ -201,6 +202,7 @@ struct SettingsView: View {
     typealias K = DictationSettings.Key
     private static let d = DictationSettings()
 
+    @AppStorage(K.engine) private var engine = d.engine
     @AppStorage(K.model) private var model = d.model
     @AppStorage(K.delay) private var delay = d.delay
     @AppStorage(K.language) private var language = d.language
@@ -215,16 +217,24 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
-            Picker("Model", selection: $model) {
+            Picker("Transcription", selection: $engine) {
+                Text("On this Mac (Parakeet) — free, offline").tag("local")
+                Text("OpenAI — cloud").tag("openai")
+            }
+            if engine == "openai" {
+            Picker("OpenAI model", selection: $model) {
                 ForEach(DictationSettings.models, id: \.self) { Text($0) }
             }
-            if model == "gpt-live-transcribe" {
+            }
+            if engine == "openai" && model == "gpt-live-transcribe" {
                 Picker("Speed vs accuracy", selection: $delay) {
                     ForEach(DictationSettings.delays, id: \.self) { Text($0) }
                 }
             }
-            TextField("Language (blank = auto)", text: $language)
-            TextField("Vocabulary hint (optional)", text: $prompt)
+            if engine == "openai" {
+                TextField("Language (blank = auto)", text: $language)
+                TextField("Vocabulary hint (optional)", text: $prompt)
+            }
             Stepper("Pause before sending: \(silenceMs) ms", value: $silenceMs, in: 100...2000, step: 50)
             HStack {
                 Text("Speech sensitivity")
@@ -232,8 +242,10 @@ struct SettingsView: View {
                 Text(String(format: "%.2f", threshold)).monospacedDigit().frame(width: 36)
             }
             Toggle("Use built-in microphone", isOn: $builtIn)
-            Toggle("OpenAI noise reduction (can drop \"s\" sounds on short words)", isOn: Binding(
-                get: { noiseReduction != "off" }, set: { noiseReduction = $0 ? "auto" : "off" }))
+            if engine == "openai" {
+                Toggle("OpenAI noise reduction (can drop \"s\" sounds on short words)", isOn: Binding(
+                    get: { noiseReduction != "off" }, set: { noiseReduction = $0 ? "auto" : "off" }))
+            }
             Toggle("Paste automatically", isOn: $autoPaste)
             Toggle("Restore my clipboard after pasting", isOn: $restoreClipboard)
             Toggle("Say \"send\" on its own to press Enter", isOn: $sendCommand)
@@ -243,7 +255,7 @@ struct SettingsView: View {
                 Button("Approve in Login Items settings…") { SMAppService.openSystemSettingsLoginItems() }
                     .buttonStyle(.link).font(.caption)
             }
-            if state.hasAPIKey { APIKeyField() }
+            if state.usesOpenAI && state.hasAPIKey { APIKeyField() }
             Button("Show log file") { NSWorkspace.shared.activateFileViewerSelecting([Log.url]) }
                 .buttonStyle(.link)
         }

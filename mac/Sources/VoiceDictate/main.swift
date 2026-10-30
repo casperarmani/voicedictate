@@ -11,11 +11,14 @@ if let i = args.firstIndex(of: "--test") {
 }
 
 func runFileTest(_ paths: [String]) -> Never {
-    guard let key = Keychain.apiKey() else { print("No API key (set OPENAI_API_KEY)"); exit(1) }
+    let settings = DictationSettings.load()
+    let key = Keychain.apiKey() ?? ""
+    if settings.engine == "openai" && key.isEmpty { print("No API key (set OPENAI_API_KEY)"); exit(1) }
+    print("engine: \(settings.engine == "local" ? "Parakeet (on this Mac)" : "OpenAI \(settings.model)")")
     guard let url = SileroVAD.bundledModelURL(), let vad = try? SileroVAD(modelURL: url) else {
         print("VAD model not found"); exit(1)
     }
-    let engine = DictationEngine(apiKey: key, settings: DictationSettings.load(), vad: vad)
+    let engine = DictationEngine(apiKey: key, settings: settings, vad: vad)
     engine.disableMicrophone()
     var latencies: [Double] = []
     engine.onTranscript = { text, ms in
@@ -41,7 +44,8 @@ func runFileTest(_ paths: [String]) -> Never {
                 if wait > 0 { Thread.sleep(forTimeInterval: wait) }
             }
         }
-        pace([Float](repeating: 0, count: 16000))  // let the session connect
+        pace([Float](repeating: 0, count: 16000))  // let the session connect / model load
+        while settings.engine == "local" && !engine.local.isReady { Thread.sleep(forTimeInterval: 0.1) }
         let dropMidway = args.contains("--drop")
         for (n, p) in paths.enumerated() {
             guard let samples = loadMono16k(p) else { print("cannot read \(p)"); continue }

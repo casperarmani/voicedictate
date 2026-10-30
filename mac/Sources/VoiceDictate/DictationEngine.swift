@@ -3,15 +3,17 @@ import Foundation
 enum EngineStatus: Equatable {
     case stopped
     case connecting
+    case loadingModel
     case listening
     case reconnecting(String)
     case error(String)
 }
 
 /// Always-on dictation pipeline:
-///   mic (16 kHz) -> Silero VAD endpointer -> OpenAI Realtime (manual commit) -> ordered transcripts.
+///   mic (16 kHz) -> Silero VAD endpointer -> transcription -> ordered transcripts.
 ///
-/// Only speech (plus a short pre-roll) is sent to OpenAI. Each utterance's audio is kept
+/// Transcription runs either on this Mac (Parakeet via FluidAudio, the default) or on
+/// OpenAI Realtime (manual commit). For OpenAI, only speech (plus a short pre-roll) is sent, and each utterance's audio is kept
 /// until its transcript arrives, so if the socket drops or rotates, unfinished utterances
 /// are replayed into the next session instead of being lost.
 ///
@@ -40,12 +42,14 @@ final class DictationEngine {
     private let vad: SileroVAD
     private let resampler = Resampler()
     private let capture = AudioCapture()
+    let local = LocalTranscriber()
+    private var useLocal: Bool { settings.engine == "local" }
     private var captureEnabled = true
 
     // Endpointer state
     private var listening = false
     private var residual: [Float] = []
-    private var preroll: [Data] = []
+    private var preroll: [(pcm: Data, raw: [Float])] = []
     private var inSpeech = false
     private var speechChunks = 0
     private var silenceChunks = 0
@@ -55,7 +59,8 @@ final class DictationEngine {
     // Utterances
     private final class Utterance {
         let seq: Int
-        var audio = Data()
+        var audio = Data()              // 24 kHz PCM16, for OpenAI (and replay)
+        var samples: [Float] = []       // 16 kHz float, for the local model
         var lastAudioAt = now()
         var committedAt: Double?
         var speechEndAt: Double?
@@ -94,6 +99,13 @@ final class DictationEngine {
         capture.onConfigurationChange = { [weak self] in
             self?.queue.async { self?.restartCapture(reason: "device change") }
         }
+        local.onState = { [weak self] _ in
+            self?.queue.async {
+                guard let self else { return }
+                self.drainLocalQueue()
+                self.refreshStatus()
+            }
+        }
         let t = DispatchSource.makeTimerSource(queue: queue)
         t.schedule(deadline: .now() + 0.5, repeating: 0.5)
         t.setEventHandler { [weak self] in self?.tick() }
@@ -118,6 +130,22 @@ final class DictationEngine {
             if keyChanged { self.fatal = false }
             if new.sessionDiffers(from: old) || keyChanged { self.configError = nil }
             if new.preferBuiltInMic != old.preferBuiltInMic { self.restartCapture(reason: "mic setting changed") }
+            if new.engine != old.engine {
+                Log.info("Transcription engine: \(new.engine == "local" ? "on this Mac (Parakeet)" : "OpenAI")")
+                if self.useLocal {
+                    self.dropSession()
+                    self.reconnectToken += 1
+                    self.reconnectScheduled = false
+                    if self.listening || !self.pending.isEmpty { self.local.prepare() }
+                    self.drainLocalQueue()
+                } else {
+                    self.fatal = false  // retry the key once; a rejection shows again if it's still bad
+                    if self.wantsConnection { self.ensureConnected() }
+                }
+                self.refreshStatus()
+                return
+            }
+            if self.useLocal { self.refreshStatus(); return }
             if (new.sessionDiffers(from: old) || keyChanged), self.conn != nil {
                 Log.info("[Realtime] Settings changed; opening a new session")
                 self.rotate(reason: "settings changed")
@@ -132,6 +160,10 @@ final class DictationEngine {
     func handleWake() {
         queue.async {
             guard self.conn != nil || self.listening else { return }
+            if self.useLocal {
+                if self.listening { self.restartCapture(reason: "wake from sleep") }
+                return
+            }
             Log.info("[Realtime] Mac woke from sleep; reconnecting")
             self.backoff = Self.backoffInitial
             self.rotate(reason: "wake from sleep")
@@ -161,7 +193,12 @@ final class DictationEngine {
                 return
             }
         }
-        Log.info("Listening (model \(settings.model), delay \(settings.delay), silence \(settings.silenceMs) ms)")
+        if useLocal {
+            Log.info("Listening (on this Mac: Parakeet, silence \(settings.silenceMs) ms)")
+            local.prepare()
+        } else {
+            Log.info("Listening (OpenAI \(settings.model), delay \(settings.delay), silence \(settings.silenceMs) ms)")
+        }
         ensureConnected()
         refreshStatus()
     }
@@ -227,7 +264,7 @@ final class DictationEngine {
         let pcm = Self.pcm24k(chunk)
         let chunkMs = 32
         if !inSpeech {
-            preroll.append(pcm)
+            preroll.append((pcm, Array(chunk)))
             let maxPre = max(1, settings.prefixMs / chunkMs)
             if preroll.count > maxPre { preroll.removeFirst(preroll.count - maxPre) }
             if p >= settings.vadThreshold {
@@ -237,7 +274,7 @@ final class DictationEngine {
                 let u = Utterance(seq: nextSeq)
                 nextSeq += 1
                 current = u
-                for d in preroll { appendAudio(d) }
+                for d in preroll { appendAudio(d.pcm, raw: d.raw) }
                 preroll.removeAll()
                 lastSpeechAt = now()
                 connectNowIfWaiting()
@@ -247,7 +284,7 @@ final class DictationEngine {
             return
         }
 
-        appendAudio(pcm)
+        appendAudio(pcm, raw: Array(chunk))
         // Hysteresis as in Silero's reference: stay in speech until p drops 0.15 below threshold.
         if p >= settings.vadThreshold - 0.15 {
             silenceChunks = 0
@@ -271,22 +308,66 @@ final class DictationEngine {
         main { self.onSpeaking?(false) }
         if speechMs < settings.minSpeechMs {
             Log.debug("[VAD] Ignored \(speechMs) ms blip")
-            if connReady { conn?.send(["type": "input_audio_buffer.clear"]) }
+            if connReady && !useLocal { conn?.send(["type": "input_audio_buffer.clear"]) }
             return
         }
         u.speechEndAt = lastSpeechAt
         u.committedAt = now()
         pending.append(u)
         Log.debug("[VAD] Speech ended (\(speechMs) ms); committing #\(u.seq)")
-        if connReady { sendCommit(u) } else { connectNowIfWaiting() }
+        if useLocal { transcribeLocally(u) }
+        else if connReady { sendCommit(u) } else { connectNowIfWaiting() }
     }
 
-    private func appendAudio(_ pcm: Data) {
+    private func appendAudio(_ pcm: Data, raw: [Float]) {
         guard let u = current else { return }
         u.audio.append(pcm)
+        u.samples += raw
         u.lastAudioAt = now()
+        if useLocal { return }
         if connReady { sendAppend(pcm) }
         else { ensureConnected() }
+    }
+
+    // MARK: - Local transcription
+
+    private var localInFlight = Set<Int>()
+
+    /// Runs Parakeet on a finished utterance. If the model is still loading, the utterance
+    /// waits in `pending` and is picked up by drainLocalQueue() once it's ready.
+    private func transcribeLocally(_ u: Utterance) {
+        guard local.isReady else { local.prepare(); return }
+        guard !localInFlight.contains(u.seq) else { return }
+        localInFlight.insert(u.seq)
+        let samples = u.samples
+        Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self else { return }
+            let result: Result<String, Error>
+            do { result = .success(try await self.local.transcribe(samples)) }
+            catch { result = .failure(error) }
+            self.queue.async {
+                self.localInFlight.remove(u.seq)
+                switch result {
+                case .success(let text): u.transcript = LocalTranscriber.tidy(text)
+                case .failure(let error):
+                    Log.warn("[Local] Transcription failed: \(error.localizedDescription)")
+                    u.failed = true
+                }
+                self.flush()
+            }
+        }
+    }
+
+    private func drainLocalQueue() {
+        guard useLocal, local.isReady else { return }
+        // Speech captured while the model was loading (e.g. first-time download) is only
+        // worth pasting if it's recent.
+        let t = now()
+        let before = pending.count
+        pending.removeAll { $0.transcript == nil && !$0.failed && !localInFlight.contains($0.seq)
+            && t - $0.lastAudioAt > Self.staleReplaySec }
+        if pending.count < before { Log.warn("[Local] Dropped \(before - pending.count) old utterance(s) spoken while the model loaded") }
+        for u in pending where u.transcript == nil && !u.failed { transcribeLocally(u) }
     }
 
     private func sendAppend(_ pcm: Data) {
@@ -322,11 +403,11 @@ final class DictationEngine {
     // MARK: - Session lifecycle
 
     private var wantsConnection: Bool {
-        listening || current != nil || !pending.isEmpty
+        !useLocal && (listening || current != nil || !pending.isEmpty)
     }
 
     private func ensureConnected() {
-        guard conn == nil, !reconnectScheduled, !fatal, configError == nil, !apiKey.isEmpty else { return }
+        guard !useLocal, conn == nil, !reconnectScheduled, !fatal, configError == nil, !apiKey.isEmpty else { return }
         connect()
     }
 
@@ -534,7 +615,8 @@ final class DictationEngine {
                 emit(text, u)
             } else if u.failed {
                 pending.removeFirst()
-            } else if let c = u.committedAt, t - c > Self.staleTranscriptSec, connReady {
+            } else if let c = u.committedAt, t - c > Self.staleTranscriptSec, !localInFlight.contains(u.seq),
+                      connReady || useLocal {
                 Log.warn("[Realtime] No transcript for utterance #\(u.seq) after \(Int(Self.staleTranscriptSec))s; skipping it")
                 pending.removeFirst()
                 if awaitingAck.contains(where: { $0 === u }) {
@@ -586,10 +668,22 @@ final class DictationEngine {
     // MARK: - Status
 
     private func refreshStatus(reason: String? = nil) {
-        if fatal { return }
+        if fatal && !useLocal {
+            setStatus(.error("OpenAI rejected the API key. Check it in Settings."))
+            return
+        }
         let s: EngineStatus
         if !listening {
             s = .stopped
+        } else if useLocal {
+            if let e = micError { s = .error(e) }
+            else {
+                switch local.currentState {
+                case .ready: s = .listening
+                case .failed(let e): s = .error("Couldn't load the speech model: \(e)")
+                default: s = .loadingModel
+                }
+            }
         } else if let e = configError {
             s = .error("OpenAI rejected the settings: \(e)")
         } else if let e = micError {

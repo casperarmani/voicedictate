@@ -108,6 +108,7 @@ enum Keychain {
 // MARK: - Settings
 
 struct DictationSettings: Equatable {
+    var engine = "local"              // "local" (Parakeet on this Mac) or "openai"
     var model = "gpt-live-transcribe"
     var delay = "low"                 // gpt-live-transcribe speed/accuracy: minimal, low, medium, high, xhigh
     var language = "en"
@@ -128,6 +129,7 @@ struct DictationSettings: Equatable {
     static let delays = ["minimal", "low", "medium", "high", "xhigh"]
 
     enum Key {
+        static let engine = "engine"
         static let model = "model", delay = "delay", language = "language", prompt = "prompt"
         static let vadThreshold = "vadThreshold", silenceMs = "silenceMs", minSpeechMs = "minSpeechMs"
         static let prefixMs = "prefixMs", autoPaste = "autoPaste", restoreClipboard = "restoreClipboard"
@@ -137,6 +139,7 @@ struct DictationSettings: Equatable {
 
     static func load(_ d: UserDefaults = .standard) -> DictationSettings {
         var s = DictationSettings()
+        if let v = d.string(forKey: Key.engine), ["local", "openai"].contains(v) { s.engine = v }
         if let v = d.string(forKey: Key.model), models.contains(v) { s.model = v }
         if let v = d.string(forKey: Key.delay), delays.contains(v) { s.delay = v }
         if let v = d.string(forKey: Key.language) { s.language = v }
@@ -162,7 +165,10 @@ struct DictationSettings: Equatable {
     static func isSendCommand(_ text: String) -> Bool {
         let letters = String(text.lowercased().map { $0.isLetter ? $0 : " " })
         let words = letters.split(separator: " ").joined(separator: " ")
-        return ["send", "sent", "sand", "send it", "sent it", "end"].contains(words)
+        // Exact list of "send" and its observed mishearings. No fuzzy matching: rules like
+        // "starts with send" would fire on short sentences such as "Send them."
+        return ["send", "sent", "sand", "end", "send it", "sent it", "sendit", "sengit", "sengid", "sendage"]
+            .contains(words)
     }
 
     /// ISO-639-1 code to send, or nil for auto-detect (blank or not a 2-letter code).

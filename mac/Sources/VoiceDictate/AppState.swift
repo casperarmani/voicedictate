@@ -17,6 +17,9 @@ final class AppState: ObservableObject {
     @Published var speaking = false
     @Published var recent: [TranscriptEntry] = []
     @Published var hasAPIKey = false
+    @Published var usesOpenAI = DictationSettings.load().engine == "openai"
+    /// An API key is only required when transcribing with OpenAI.
+    var needsAPIKey: Bool { usesOpenAI && !hasAPIKey }
     @Published var micGranted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
     @Published var accessibilityGranted = Permissions.accessibility
     @Published var micKeyActive = false
@@ -85,7 +88,7 @@ final class AppState: ObservableObject {
 
     func start() {
         guard let engine else { return }
-        guard hasAPIKey else { wantsListening = false; return }
+        guard !needsAPIKey else { wantsListening = false; return }
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             micGranted = true
@@ -158,6 +161,7 @@ final class AppState: ObservableObject {
         let new = DictationSettings.load()
         guard new != settings else { return }
         settings = new
+        usesOpenAI = new.engine == "openai"
         engine?.update(settings: new, apiKey: apiKey ?? "")
     }
 

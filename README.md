@@ -21,8 +21,10 @@ No buttons to hold, no fixed timers. Works from **any app** — Chrome, Slack, N
 - Say **"send"** on its own (after a pause) to press Enter, e.g. to submit a prompt to an agent.
   "Send me the logs" is typed normally; only the word by itself counts. Toggle in Settings.
 - Window + menu bar icon show whether it's listening; recent transcripts are listed in the window.
-- Uses OpenAI `gpt-live-transcribe` (streams while you talk). Speech is detected on your Mac
-  (Silero VAD), and only speech is sent to OpenAI.
+- Transcribes **on your Mac** with NVIDIA Parakeet TDT 0.6B v2 (Core ML on the Neural Engine,
+  via FluidAudio): free, offline, text ~0.3 s after you stop talking. The model (~440 MB)
+  downloads once on first launch. OpenAI `gpt-live-transcribe` is still available in Settings.
+- Speech is detected on your Mac (Silero VAD); with OpenAI, only speech is sent.
 - Reconnects automatically (including after sleep) and replays any unfinished sentence, so
   dropped connections don't lose text. Your clipboard is restored after each paste.
 
@@ -36,7 +38,7 @@ System Settings → Privacy & Security → **Accessibility** (needed for pasting
 Then set System Settings → Keyboard → Dictation → Shortcut to anything other than the
 microphone key, so Apple Dictation doesn't also react to F5.
 
-The API key is read once from `.env` into the macOS Keychain by `build.sh` (or paste it in the app).
+An OpenAI API key is only needed for the OpenAI option; `build.sh` passes the one in `.env` to the app.
 Logs: `~/Library/Logs/VoiceDictate/VoiceDictate.log`.
 Pipeline test without a mic: `mac/.build/debug/VoiceDictate --test [--drop] clip1.wav clip2.wav`.
 

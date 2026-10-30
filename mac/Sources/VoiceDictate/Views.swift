@@ -209,6 +209,8 @@ struct SettingsView: View {
     @AppStorage(K.silenceMs) private var silenceMs = d.silenceMs
     @AppStorage(K.autoPaste) private var autoPaste = d.autoPaste
     @AppStorage(K.restoreClipboard) private var restoreClipboard = d.restoreClipboard
+    @AppStorage(K.sendCommand) private var sendCommand = d.sendCommand
+    @AppStorage(K.noiseReduction) private var noiseReduction = d.noiseReduction
     @AppStorage(K.preferBuiltInMic) private var builtIn = d.preferBuiltInMic
 
     var body: some View {
@@ -230,8 +232,11 @@ struct SettingsView: View {
                 Text(String(format: "%.2f", threshold)).monospacedDigit().frame(width: 36)
             }
             Toggle("Use built-in microphone", isOn: $builtIn)
+            Toggle("OpenAI noise reduction (can drop \"s\" sounds on short words)", isOn: Binding(
+                get: { noiseReduction != "off" }, set: { noiseReduction = $0 ? "auto" : "off" }))
             Toggle("Paste automatically", isOn: $autoPaste)
             Toggle("Restore my clipboard after pasting", isOn: $restoreClipboard)
+            Toggle("Say \"send\" on its own to press Enter", isOn: $sendCommand)
             Toggle("Open at login", isOn: Binding(
                 get: { state.launchAtLogin }, set: { state.setLaunchAtLogin($0) }))
             if state.launchNeedsApproval {

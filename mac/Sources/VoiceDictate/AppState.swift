@@ -135,9 +135,15 @@ final class AppState: ObservableObject {
     // MARK: - Internals
 
     private func deliver(_ text: String, _ latency: Double?) {
-        recent.insert(TranscriptEntry(text: text, latencyMs: latency), at: 0)
+        let isSend = settings.sendCommand && settings.autoPaste && DictationSettings.isSendCommand(text)
+        recent.insert(TranscriptEntry(text: isSend ? "⏎ Enter" : text, latencyMs: latency), at: 0)
         if recent.count > 30 { recent.removeLast(recent.count - 30) }
-        paster.deliver(text, autoPaste: settings.autoPaste, restoreClipboard: settings.restoreClipboard)
+        if isSend {
+            Log.info("[Paste] Heard \"\(text)\" → pressing Enter")
+            paster.pressEnter()
+        } else {
+            paster.deliver(text, autoPaste: settings.autoPaste, restoreClipboard: settings.restoreClipboard)
+        }
     }
 
     /// Text fields write on every keystroke; wait until typing pauses before applying.

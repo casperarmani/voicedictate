@@ -18,6 +18,8 @@ No buttons to hold, no fixed timers. Works from **any app** — Chrome, Slack, N
 `mac/` contains a native Mac app, **Voice Dictate.app**, with the same always-on behaviour and no Terminal:
 
 - Open the app → it starts listening. Quit → it stops. **F5 (the mic key)** pauses/resumes.
+- Say **"send"** on its own (after a pause) to press Enter, e.g. to submit a prompt to an agent.
+  "Send me the logs" is typed normally; only the word by itself counts. Toggle in Settings.
 - Window + menu bar icon show whether it's listening; recent transcripts are listed in the window.
 - Uses OpenAI `gpt-live-transcribe` (streams while you talk). Speech is detected on your Mac
   (Silero VAD), and only speech is sent to OpenAI.

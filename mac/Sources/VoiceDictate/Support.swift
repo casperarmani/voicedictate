@@ -118,8 +118,11 @@ struct DictationSettings: Equatable {
     var prefixMs = 500                // audio kept from before speech started
     var autoPaste = true
     var restoreClipboard = true
+    var sendCommand = true            // saying just "send" presses Enter
     var preferBuiltInMic = true
-    var noiseReduction = "auto"       // auto, far_field, near_field, off
+    // OpenAI's noise reduction clips "s" sounds on short words ("send" -> "and"), and our own
+    // speech detector already keeps background noise from being sent, so it's off by default.
+    var noiseReduction = "off"        // auto, far_field, near_field, off
 
     static let models = ["gpt-live-transcribe", "gpt-transcribe", "gpt-4o-mini-transcribe"]
     static let delays = ["minimal", "low", "medium", "high", "xhigh"]
@@ -128,6 +131,7 @@ struct DictationSettings: Equatable {
         static let model = "model", delay = "delay", language = "language", prompt = "prompt"
         static let vadThreshold = "vadThreshold", silenceMs = "silenceMs", minSpeechMs = "minSpeechMs"
         static let prefixMs = "prefixMs", autoPaste = "autoPaste", restoreClipboard = "restoreClipboard"
+        static let sendCommand = "sendCommand"
         static let preferBuiltInMic = "preferBuiltInMic", noiseReduction = "noiseReduction"
     }
 
@@ -143,6 +147,7 @@ struct DictationSettings: Equatable {
         if d.object(forKey: Key.prefixMs) != nil { s.prefixMs = d.integer(forKey: Key.prefixMs) }
         if d.object(forKey: Key.autoPaste) != nil { s.autoPaste = d.bool(forKey: Key.autoPaste) }
         if d.object(forKey: Key.restoreClipboard) != nil { s.restoreClipboard = d.bool(forKey: Key.restoreClipboard) }
+        if d.object(forKey: Key.sendCommand) != nil { s.sendCommand = d.bool(forKey: Key.sendCommand) }
         if d.object(forKey: Key.preferBuiltInMic) != nil { s.preferBuiltInMic = d.bool(forKey: Key.preferBuiltInMic) }
         if let v = d.string(forKey: Key.noiseReduction) { s.noiseReduction = v }
         s.vadThreshold = min(max(s.vadThreshold, 0.1), 0.95)
@@ -150,6 +155,14 @@ struct DictationSettings: Equatable {
         s.minSpeechMs = min(max(s.minSpeechMs, 0), 2000)
         s.prefixMs = min(max(s.prefixMs, 0), 1500)
         return s
+    }
+
+    /// True when a whole utterance is just "send" (or a common mishearing of it).
+    /// "Send me the logs" doesn't count: only the word on its own.
+    static func isSendCommand(_ text: String) -> Bool {
+        let letters = String(text.lowercased().map { $0.isLetter ? $0 : " " })
+        let words = letters.split(separator: " ").joined(separator: " ")
+        return ["send", "sent", "sand", "send it", "sent it", "end"].contains(words)
     }
 
     /// ISO-639-1 code to send, or nil for auto-detect (blank or not a 2-letter code).

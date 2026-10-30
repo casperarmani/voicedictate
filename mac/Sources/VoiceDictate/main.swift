@@ -20,7 +20,8 @@ func runFileTest(_ paths: [String]) -> Never {
     var latencies: [Double] = []
     engine.onTranscript = { text, ms in
         if let ms { latencies.append(ms) }
-        print(String(format: "  → %5.0f ms  %@", ms ?? -1, text))
+        let enter = DictationSettings.isSendCommand(text) ? "   ⏎ would press Enter" : ""
+        print(String(format: "  → %5.0f ms  %@%@", ms ?? -1, text, enter))
     }
     engine.onStatus = { print("  [status] \($0)") }
     engine.start()

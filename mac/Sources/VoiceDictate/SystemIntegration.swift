@@ -15,7 +15,8 @@ final class Paster {
     private static let restoreDelay = 1.5
     private static let maxSnapshotBytes = 20_000_000
 
-    private var queue: [String] = []
+    private enum Item { case text(String), enter }
+    private var queue: [Item] = []
     private var busy = false
     private var saved: [NSPasteboardItem]?
     private var ourChangeCount = -1
@@ -26,15 +27,29 @@ final class Paster {
     func deliver(_ text: String, autoPaste: Bool, restoreClipboard: Bool) {
         self.autoPaste = autoPaste
         self.restoreClipboard = restoreClipboard
-        queue.append(text)
+        queue.append(.text(text))
+        if !busy { pasteNext() }
+    }
+
+    /// Presses Return after any text still waiting to be pasted.
+    func pressEnter() {
+        queue.append(.enter)
         if !busy { pasteNext() }
     }
 
     private func pasteNext() {
-        guard !queue.isEmpty else { busy = false; scheduleRestore(); return }
+        guard let first = queue.first else { busy = false; scheduleRestore(); return }
         busy = true
-        let text = queue.joined(separator: " ")
-        queue.removeAll()
+        if case .enter = first {
+            queue.removeFirst()
+            if AXIsProcessTrusted() { Self.pressKey(CGKeyCode(kVK_Return), flags: []) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.pasteGap) { [weak self] in self?.pasteNext() }
+            return
+        }
+        // Join the text waiting before the next Enter into one paste.
+        var parts: [String] = []
+        while case .text(let t)? = queue.first { parts.append(t); queue.removeFirst() }
+        let text = parts.joined(separator: " ")
 
         let pb = NSPasteboard.general
         let canPaste = autoPaste && AXIsProcessTrusted()
@@ -93,13 +108,14 @@ final class Paster {
         return items
     }
 
-    private static func pressCmdV() {
+    private static func pressCmdV() { pressKey(CGKeyCode(kVK_ANSI_V), flags: .maskCommand) }
+
+    private static func pressKey(_ key: CGKeyCode, flags: CGEventFlags) {
         let src = CGEventSource(stateID: .combinedSessionState)
-        let v = CGKeyCode(kVK_ANSI_V)
-        let down = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: true)
-        let up = CGEvent(keyboardEventSource: src, virtualKey: v, keyDown: false)
-        down?.flags = .maskCommand
-        up?.flags = .maskCommand
+        let down = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: true)
+        let up = CGEvent(keyboardEventSource: src, virtualKey: key, keyDown: false)
+        down?.flags = flags
+        up?.flags = flags
         down?.post(tap: .cghidEventTap)
         up?.post(tap: .cghidEventTap)
     }

@@ -56,6 +56,15 @@ final class DictationEngine {
     private var lastSpeechAt = 0.0
     private var stoppedAt = 0.0
 
+    // Self-healing: restart the mic if it goes quiet, and report if the engine queue hangs.
+    static let audioStallSec = 3.0              // no samples at all for this long -> restart mic
+    static let engineStallSec = 5.0             // engine queue unresponsive this long -> log it
+    private var lastAudioAt = 0.0
+    private var lastBadAudioWarn = -Double.infinity
+    private let beatLock = NSLock()
+    private var lastBeat = now()                // updated by tick(); guarded by beatLock
+    private var watchdog: DispatchSourceTimer?
+
     // Utterances
     private final class Utterance {
         let seq: Int
@@ -111,6 +120,24 @@ final class DictationEngine {
         t.setEventHandler { [weak self] in self?.tick() }
         t.resume()
         timer = t
+
+        // Runs off the engine queue, so it still fires if that queue is stuck.
+        let w = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
+        var stallReported = false
+        w.schedule(deadline: .now() + 2, repeating: 2)
+        w.setEventHandler { [weak self] in
+            guard let self else { return }
+            let age = self.beatLock.withLock { now() - self.lastBeat }
+            if age > Self.engineStallSec && !stallReported {
+                stallReported = true
+                Log.warn("[Engine] Audio processing has been stuck for \(Int(age)) s")
+            } else if age < 2 && stallReported {
+                stallReported = false
+                Log.info("[Engine] Audio processing recovered")
+            }
+        }
+        w.resume()
+        watchdog = w
     }
 
     /// For tests: feed audio yourself instead of using the microphone.
@@ -183,6 +210,8 @@ final class DictationEngine {
         residual.removeAll()
         preroll.removeAll()
         resampler.reset()
+        vad.reset()   // a bad state in the speech detector must not survive pause/resume
+        lastAudioAt = now()
         if captureEnabled {
             do {
                 try capture.start(preferBuiltIn: settings.preferBuiltInMic)
@@ -223,6 +252,8 @@ final class DictationEngine {
         if inSpeech { endUtterance() }
         residual.removeAll()
         resampler.reset()
+        vad.reset()
+        lastAudioAt = now()
         let wasBuiltIn = capture.isBuiltIn
         do {
             try capture.start(preferBuiltIn: settings.preferBuiltInMic)
@@ -249,6 +280,15 @@ final class DictationEngine {
 
     private func ingest(_ samples: [Float], rate: Double) {
         guard listening else { return }
+        lastAudioAt = now()
+        var samples = samples
+        if samples.contains(where: { !$0.isFinite }) {
+            if now() - lastBadAudioWarn > 10 {
+                lastBadAudioWarn = now()
+                Log.warn("[Audio] Microphone sent invalid samples; replacing them with silence")
+            }
+            samples = samples.map { $0.isFinite ? $0 : 0 }
+        }
         residual += resampler.to16k(samples, rate: rate)
         let n = SileroVAD.chunkSamples
         var offset = 0
@@ -261,6 +301,13 @@ final class DictationEngine {
 
     private func processChunk(_ chunk: ArraySlice<Float>) {
         let p = vad.process(chunk)
+        guard p.isFinite else {
+            // Once the detector's memory holds NaN it reports "no speech" forever.
+            Log.warn("[VAD] Invalid speech score (\(p)); resetting the speech detector")
+            vad.reset()
+            if inSpeech { endUtterance() }
+            return
+        }
         let pcm = Self.pcm24k(chunk)
         let chunkMs = 32
         if !inSpeech {
@@ -641,6 +688,11 @@ final class DictationEngine {
     // MARK: - Maintenance
 
     private func tick() {
+        beatLock.withLock { lastBeat = now() }
+        if listening && captureEnabled && !restartPending && t(lastAudioAt) > Self.audioStallSec {
+            Log.warn(String(format: "[Audio] No audio from the microphone for %.0f s; restarting it", t(lastAudioAt)))
+            restartCapture(reason: "no audio")
+        }
         flush()
         if let c = conn {
             if !connReady {

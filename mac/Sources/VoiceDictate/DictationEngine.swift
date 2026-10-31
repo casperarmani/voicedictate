@@ -65,6 +65,16 @@ final class DictationEngine {
     private var lastBeat = now()                // updated by tick(); guarded by beatLock
     private var watchdog: DispatchSourceTimer?
 
+    // Diagnostics: every 30 s, log how loud the mic was and the highest speech score, so a
+    // "stopped hearing me" moment shows whether the mic was too quiet or the detector missed it.
+    static let levelLogSec = 30.0
+    private var winSumSq = 0.0
+    private var winSamples = 0
+    private var winPeak: Float = 0
+    private var winMaxScore: Float = 0
+    private var winSpeech = 0
+    private var lastLevelLog = now()
+
     // Utterances
     private final class Utterance {
         let seq: Int
@@ -308,6 +318,9 @@ final class DictationEngine {
             if inSpeech { endUtterance() }
             return
         }
+        for v in chunk { winSumSq += Double(v * v); winPeak = max(winPeak, abs(v)) }
+        winSamples += chunk.count
+        winMaxScore = max(winMaxScore, p)
         let pcm = Self.pcm24k(chunk)
         let chunkMs = 32
         if !inSpeech {
@@ -325,6 +338,7 @@ final class DictationEngine {
                 preroll.removeAll()
                 lastSpeechAt = now()
                 connectNowIfWaiting()
+                winSpeech += 1
                 Log.debug("[VAD] Speech started")
                 main { self.onSpeaking?(true) }
             }
@@ -687,12 +701,27 @@ final class DictationEngine {
 
     // MARK: - Maintenance
 
+    private func logLevelsIfDue() {
+        guard t(lastLevelLog) >= Self.levelLogSec else { return }
+        defer {
+            lastLevelLog = now()
+            winSumSq = 0; winSamples = 0; winPeak = 0; winMaxScore = 0; winSpeech = 0
+        }
+        guard listening, winSamples > 0 else { return }
+        let db = { (x: Double) in x > 0 ? 20 * log10(x) : -120 }
+        let rms = (winSumSq / Double(winSamples)).squareRoot()
+        Log.info(String(format: "[Level] last %.0f s: mic avg %.0f dB, peak %.0f dB, top speech score %.2f (needs %.2f), %d utterance(s) — %@",
+                        t(lastLevelLog), db(rms), db(Double(winPeak)), winMaxScore, settings.vadThreshold, winSpeech,
+                        capture.deviceName))
+    }
+
     private func tick() {
         beatLock.withLock { lastBeat = now() }
         if listening && captureEnabled && !restartPending && t(lastAudioAt) > Self.audioStallSec {
             Log.warn(String(format: "[Audio] No audio from the microphone for %.0f s; restarting it", t(lastAudioAt)))
             restartCapture(reason: "no audio")
         }
+        logLevelsIfDue()
         flush()
         if let c = conn {
             if !connReady {
